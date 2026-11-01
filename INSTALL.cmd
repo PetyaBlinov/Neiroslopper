@@ -14,6 +14,8 @@ if exist "vendor\wheels" (
   ".venv\Scripts\python.exe" -m pip install -r requirements.txt
 )
 if errorlevel 1 goto fail
+".venv\Scripts\python.exe" tools\create_shortcut.py
+if errorlevel 1 goto fail
 echo Ready. Run START.cmd.
 pause
 exit /b 0
