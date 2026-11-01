@@ -4,6 +4,7 @@
 <h1 align="center">Neiroslopper</h1>
 <p align="center"><strong>Windows-пульт для CNC-плоттера на FluidNC</strong><br>От эскиза на экране — к линиям на бумаге.</p>
 <p align="center">
+  <a href="https://github.com/PetyaBlinov/Neiroslopper/actions/workflows/tests.yml"><img alt="Windows CI" src="https://github.com/PetyaBlinov/Neiroslopper/actions/workflows/tests.yml/badge.svg?branch=main"></a>
   <img alt="Windows" src="https://img.shields.io/badge/Windows-desktop-17633f">
   <img alt="Python 3.11–3.14" src="https://img.shields.io/badge/Python-3.11%E2%80%933.14-17633f">
   <img alt="FluidNC 4.1.1" src="https://img.shields.io/badge/FluidNC-4.1.1-17633f">
