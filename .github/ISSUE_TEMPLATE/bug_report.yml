@@ -1,0 +1,58 @@
+name: Ошибка программы
+description: Сообщить о воспроизводимой проблеме пульта
+title: '[Bug] '
+labels: ['bug']
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Что произошло
+      description: Какое действие выполнялось и какой результат получен?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Как повторить
+      placeholder: |
+        1. Запустить программу...
+        2. Выбрать...
+        3. Нажать...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Ожидаемое поведение
+    validations:
+      required: true
+  - type: dropdown
+    id: connection
+    attributes:
+      label: Режим подключения
+      options:
+        - DEMO — без оборудования
+        - USB — FluidNC
+        - Wi-Fi / TCP — FluidNC
+        - Arduino Uno / GRBL
+        - Не относится к подключению
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Система и версия программы
+      placeholder: Windows 11, Python 3.12, commit или тег
+    validations:
+      required: true
+  - type: input
+    id: controller
+    attributes:
+      label: Плата и прошивка
+      description: Если плата использовалась — её ревизия и версия FluidNC/GRBL.
+      placeholder: MKS DLC32 v2.2, FluidNC v4.1.1
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Сообщение об ошибке или иллюстрация
+      description: Приложите только относящийся к ошибке фрагмент. Уберите личные пути и адреса; не прикладывайте пароли, .env, приватные проекты или полный дамп памяти платы.

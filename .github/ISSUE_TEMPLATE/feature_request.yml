@@ -1,0 +1,36 @@
+name: Предложение
+description: Предложить улучшение интерфейса или работы с плоттером
+title: '[Feature] '
+labels: ['enhancement']
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: Какую задачу нужно решить
+      description: Опишите конкретный сценарий пользователя.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Предлагаемое поведение
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Область
+      options:
+        - Интерфейс
+        - Редактор и SVG
+        - FluidNC / USB / Wi-Fi
+        - Ручка / соленоид
+        - Документация
+        - Другое
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Как проверить результат
+      description: Что должно получиться, чтобы считать задачу выполненной?
