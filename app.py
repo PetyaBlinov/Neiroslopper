@@ -45,7 +45,9 @@ class App:
         self.data_dir = data_dir
         from editor_tools.studio_store import Autosaves
         self.autosaves = Autosaves(data_dir) if data_dir is not None else None
-        self.controller = Controller(network_interlock=self.network_lease_ready)
+        # Worker-owned objects must not retain this Tk window. The legacy
+        # display lease callback is no longer used by the command transport.
+        self.controller = Controller()
         self.connected = False
         self.zero = False
         self.sheet = None
@@ -1487,6 +1489,11 @@ class App:
         # Auxiliary windows and autosaves can wait for workers. Stop motion
         # before any of those waits, as soon as closing is accepted.
         self.controller.shutdown()
+        # The controller only publishes to a queue; it never waits for Tk.
+        # Finish its normal cleanup before destroying the Tcl interpreter,
+        # while keeping a stalled transport from blocking window close.
+        if self.controller.worker.is_alive():
+            self.controller.worker.join(timeout=3)
         if self.dwin_window is not None:
             self.dwin_window.close()
         for name in ('pump_timer', 'redraw_timer'):

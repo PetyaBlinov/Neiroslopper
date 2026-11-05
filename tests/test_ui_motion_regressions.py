@@ -7,6 +7,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import App
 from controller import Controller
+from tk_test_support import close_tk_app
 from machine_profiles import UNO, DLC32, PROFILE_LABELS, app_profile
 
 
@@ -20,7 +21,7 @@ class MotionAxisUiTests(unittest.TestCase):
         self.root.update()
 
     def tearDown(self):
-        self.app.close()
+        close_tk_app(self)
 
     def test_new_fluidnc_window_uses_logical_x_for_carriage(self):
         self.assertEqual(app_profile(self.app), DLC32)

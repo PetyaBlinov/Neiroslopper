@@ -9,6 +9,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import App
 from controller import Controller
+from tk_test_support import close_tk_app
 from machine_profiles import UNO, DLC32, PROFILE_LABELS, app_profile
 
 
@@ -36,8 +37,7 @@ class ConnectionUiTests(unittest.TestCase):
         if self.app.wifi_search_thread is not None:
             self.app.wifi_search_thread.join(1)
         self.app.controller.busy = False
-        if not self.app.closed:
-            self.app.close()
+        close_tk_app(self)
 
     def mode(self, value):
         self.app.connection_mode.set(value)

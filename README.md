@@ -9,7 +9,7 @@
   <img alt="Python 3.11–3.14" src="https://img.shields.io/badge/Python-3.11%E2%80%933.14-17633f">
   <img alt="FluidNC 4.1.1" src="https://img.shields.io/badge/FluidNC-4.1.1-17633f">
   <img alt="Version 0.2.0" src="https://img.shields.io/badge/version-0.2.0-17633f">
-  <img alt="193 checks passed" src="https://img.shields.io/badge/tests-193%20passed-17633f">
+  <img alt="194 checks passed" src="https://img.shields.io/badge/tests-194%20passed-17633f">
 </p>
 <p align="center">
   <a href="#быстрый-старт">Запуск</a> ·
@@ -84,7 +84,7 @@ Neiroslopper **0.2.0** помогает подготовить рисунок, �
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-Основные проверки используют имитатор контроллера и localhost. Они не двигают физический станок. Для версии **0.2.0 прошли 193 теста**; подробнее — [что именно проверено](docs/validation.md).
+Основные проверки используют имитатор контроллера и localhost. Они не двигают физический станок. Для версии **0.2.0 прошли 194 теста**; подробнее — [что именно проверено](docs/validation.md).
 
 - `main` — проверенная рабочая версия.
 - `develop` — подготовка следующих изменений.

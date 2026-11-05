@@ -7,6 +7,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import App
 from controller import Controller
+from tk_test_support import close_tk_app
 from geometry import Sheet
 from machine_profiles import UNO, DLC32, PROFILE_LABELS
 
@@ -22,7 +23,7 @@ class ManualJogUiTests(unittest.TestCase):
 
     def tearDown(self):
         self.app.controller.busy = False
-        self.app.close()
+        close_tk_app(self)
 
     def test_default_is_motors_only_with_manual_nib_instruction(self):
         self.assertFalse(self.app.jog_lift.get())

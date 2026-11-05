@@ -15,6 +15,7 @@ from machine_profiles import (DLC32, PROFILE_LABELS, fluidnc_configuration,
                               fluidnc_pen_profile, settings_ready)
 from test_controller import ProtocolWire, DEFAULT_CONFIG
 from test_wiring_setup import commissioned_parameters
+from tk_test_support import close_tk_app
 import yaml
 
 
@@ -28,8 +29,39 @@ class DesktopTests(unittest.TestCase):
         self.root.update()
 
     def tearDown(self):
-        if not self.app.closed:
-            self.app.close()
+        close_tk_app(self)
+
+    def test_close_finishes_worker_before_destroying_tk(self):
+        entered, release = threading.Event(), threading.Event()
+
+        def execute(action, params):
+            entered.set()
+            release.wait(2)
+
+        controller = self.app.controller
+        with patch.object(controller, "execute", side_effect=execute):
+            self.assertTrue(controller.submit("offline_fixture"))
+            self.assertTrue(entered.wait(1))
+            # Fake queue job; no transport or controller command is opened.
+            timer = threading.Timer(.1, release.set)
+            timer.daemon = True
+            timer.start()
+            destroyed_after_worker = []
+            original_destroy = self.root.destroy
+
+            def destroy():
+                destroyed_after_worker.append(not controller.worker.is_alive())
+                original_destroy()
+
+            try:
+                with patch("app.messagebox.askokcancel", return_value=True), \
+                        patch.object(self.root, "destroy", side_effect=destroy):
+                    self.app.close()
+            finally:
+                release.set()
+                timer.join(1)
+        self.assertEqual(destroyed_after_worker, [True])
+        self.assertFalse(controller.worker.is_alive())
 
     def wait_for(self, predicate, timeout=8):
         stop = time.monotonic() + timeout
