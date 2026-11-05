@@ -49,3 +49,9 @@ Desktop.ini
 *.lnk
 
 # Project branding in assets/*.png and assets/*.ico is intentionally tracked.
+
+# Obsolete locally generated handouts use the former wiring and UI layout.
+# Current instructions are the maintained Markdown documents in docs/.
+/docs/artifacts/
+/docs/build_*_pdf.py
+/docs/images/wiring-*.png

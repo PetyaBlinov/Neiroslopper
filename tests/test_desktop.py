@@ -9,8 +9,13 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import App
 from controller import Controller, GrblSession
-from machine_profiles import DLC32
+from fluidnc_setup import generate_config
+from geometry import Sheet
+from machine_profiles import (DLC32, PROFILE_LABELS, fluidnc_configuration,
+                              fluidnc_pen_profile, settings_ready)
 from test_controller import ProtocolWire, DEFAULT_CONFIG
+from test_wiring_setup import commissioned_parameters
+import yaml
 
 
 class DesktopTests(unittest.TestCase):
@@ -19,6 +24,8 @@ class DesktopTests(unittest.TestCase):
         self.root = tk.Tk()
         self.root.withdraw()
         self.app = App(self.root, data_dir=None)
+        # Flush initial theme/icon callbacks while this hidden root is alive.
+        self.root.update()
 
     def tearDown(self):
         if not self.app.closed:
@@ -49,12 +56,75 @@ class DesktopTests(unittest.TestCase):
         from editor_tools.text_paths import generate_text_paths
         from geometry import Sheet, validate_paths
         self.app.open_editor()
+        self.app.editor_window.root.withdraw()
         self.root.update()
         self.assertIsNotNone(self.app.editor_window)
         self.assertFalse(self.app.connected)
         text = generate_text_paths('Привет, CNC!', height_mm=3, origin=(5, 5))
         self.assertGreater(len(text.paths), 10)
         validate_paths(text.paths, Sheet(210, 297))
+
+    def fluidnc_idle_view(self, *, commissioning):
+        """Populate only the UI view model; no connection or hardware action."""
+        config = generate_config(commissioned_parameters(
+            endstops='none', no_endstops_confirmed=True))
+        config['meta'] = ('NEIROSLOPPER_COMMISSIONING directions and scale unverified'
+                          if commissioning else 'Offline TEST fixture')
+        self.app.settings = fluidnc_configuration(yaml.safe_dump(config))
+        self.app.pen_firmware = fluidnc_pen_profile(self.app.settings)
+        self.app.machine_profile.set(PROFILE_LABELS[DLC32])
+        self.app.connected = True
+        self.app.simulation = False
+        self.app.position = (0.0, 0.0)
+        self.app.status.set('Idle · offline test fixture')
+        self.app.pen_enabled.set(True)
+        self.app.pen_active.set('LOW')
+        self.app.pen_power_raises.set(True)
+        self.app.pen_continuous.set(False)
+        self.app.pen_confirmed.set(True)
+        self.app.controller.cancelled.clear()
+        self.app.update_controls()
+        self.assertEqual(self.root.state(), 'withdrawn')
+        self.assertIsNone(self.app.controller.session)
+
+    def test_commissioning_xy_blocks_motion_but_verified_relay_controls_are_enabled(self):
+        self.fluidnc_idle_view(commissioning=True)
+        self.assertFalse(settings_ready(self.app.settings, DLC32))
+        self.assertTrue(self.app.pen_ready())
+        for button in (self.app.pen_up_button, self.app.pen_pulse_button):
+            self.assertEqual(str(button['state']), 'normal')
+        for button in (*self.app.jog_buttons, self.app.first_button,
+                       self.app.draw_button, self.app.startpoint_button):
+            self.assertEqual(str(button['state']), 'disabled')
+
+    def test_test_profile_enables_jog_then_drawing_only_after_both_corners_and_paths(self):
+        self.fluidnc_idle_view(commissioning=False)
+        self.assertTrue(settings_ready(self.app.settings, DLC32))
+        self.assertTrue(all(str(button['state']) == 'normal' for button in self.app.jog_buttons))
+        self.assertEqual(str(self.app.first_button['state']), 'normal')
+        self.assertEqual(str(self.app.second_button['state']), 'disabled')
+        self.assertEqual(str(self.app.draw_button['state']), 'disabled')
+        self.assertEqual(str(self.app.startpoint_button['state']), 'disabled')
+
+        # A drawing alone cannot replace the physical two-corner calibration.
+        self.app.paths = [[(2.0, 2.0), (5.0, 5.0)]]
+        self.app.zero = True
+        self.app.update_controls()
+        self.assertEqual(str(self.app.second_button['state']), 'normal')
+        self.assertEqual(str(self.app.draw_button['state']), 'disabled')
+        self.assertEqual(str(self.app.startpoint_button['state']), 'disabled')
+
+        self.app.sheet = Sheet(20, 20)
+        self.app.paths = []
+        self.app.update_controls()
+        self.assertEqual(str(self.app.draw_button['state']), 'disabled')
+        self.assertEqual(str(self.app.startpoint_button['state']), 'disabled')
+
+        self.app.paths = [[(2.0, 2.0), (5.0, 5.0)]]
+        self.app.update_controls()
+        self.assertEqual(str(self.app.draw_button['state']), 'normal')
+        self.assertEqual(str(self.app.startpoint_button['state']), 'normal')
+        self.assertIsNone(self.app.controller.session)
 
     def test_demo_calibration_drawing_and_stop_preserve_workflow(self):
         self.app.pen_enabled.set(False)

@@ -2,10 +2,12 @@
 import math
 from pathlib import Path
 import queue
+import re
 import threading
+import time
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-from controller import Controller, REQUIRED, MACHINE_MAX_FEED, MAX_JOG_DISTANCE
+from controller import Controller, REQUIRED, MACHINE_MAX_FEED, MAX_JOG_DISTANCE, DLC32_MAX_ON_SECONDS
 from geometry import Axes, Sheet, load_svg, test_square
 from editor_history import EditHistory
 from pen_lift import PenLiftSettings, load_settings, save_settings, connection_notice, firmware_profile
@@ -13,6 +15,26 @@ from machine_profiles import (UNO, DLC32, PROFILE_LABELS, profile_id, app_profil
                               settings_ready, pen_matches, load_selected_profile,
                               save_selected_profile, pen_settings_directory)
 from branding import APP_NAME, APP_TITLE, apply_app_icon
+from wifi_discovery import discover_fluidnc, MDNS_AVAILABLE
+from connection_preferences import load_verified_endpoints, remember_verified_endpoint
+
+
+def endstop_summary(report, now=None):
+    """Keep absent configuration and stale reports distinct from released NCs."""
+    if not isinstance(report, dict) or report.get("pins") is None:
+        return "Концевики: свежие данные ещё не получены"
+    now = time.monotonic() if now is None else now
+    age = max(0, now - report.get("observed_at", 0))
+    if age > 3:
+        return "Концевики: данные устарели; нажмите «Проверить концевики»"
+    pins = report["pins"]
+    configured = report.get("configured", {})
+    parts = []
+    for axis in ("x", "y"):
+        state = ("не назначен" if not configured.get(axis) else
+                 "СРАБОТАЛ / ОБРЫВ" if axis.upper() in pins else "отпущен")
+        parts.append(axis.upper() + ": " + state)
+    return "Концевики: " + " · ".join(parts) + f" · {age:.1f} с назад"
 
 
 class App:
@@ -51,13 +73,33 @@ class App:
         self.preview_transform = None
         self.redraw_timer = None
         self.settings = {}
+        self.endstop_report = None
+        self.endstop_text = tk.StringVar(value=endstop_summary(None))
+        self.wiring_text = tk.StringVar(value="")
         self.port_name = ""
         self.simulation = False
         self.file_name = "Рисунок не выбран"
+        # Canonical transport stays internal; the visible controls choose a
+        # connection method and a device, never an editable TCP address.
         self.port = tk.StringVar(value="DEMO")
+        self.connection_mode = tk.StringVar(value="Демо")
+        self.active_connection_mode = "Демо"
+        self.usb_port = tk.StringVar(value="")
+        self.wifi_target = tk.StringVar(value="")
+        self.connection_help = tk.StringVar(value="Демо работает без платы и не отправляет команды оборудованию.")
+        self.wifi_status = tk.StringVar(value="Нажмите «Найти плату», когда ноутбук подключён к нужной сети.")
+        self.wifi_devices = {}
+        self.wifi_events = queue.Queue()
+        self.wifi_search_token = None
+        self.wifi_search_cancel = None
+        self.wifi_search_thread = None
+        self.wifi_searching = False
+        self.remembered_wifi = load_verified_endpoints(data_dir)
         self.machine_profile = tk.StringVar(value=PROFILE_LABELS[load_selected_profile(data_dir)])
         self.step = tk.StringVar(value="1")
         self.feed = tk.StringVar(value="50")
+        self.jog_lift = tk.BooleanVar(value=False)
+        self.jog_lift_hint = tk.StringVar(value="")
         self.margin = tk.StringVar(value="3")
         self.hold = tk.BooleanVar(value=True)
         pen = self.stored_pen_settings()
@@ -73,14 +115,19 @@ class App:
         self.pen_observer = None
         self.pen_status = tk.StringVar(value="")
         self.pen_summary = tk.StringVar(value="")
-        self.pen_legend = tk.StringVar(value=connection_notice(pen.enabled, pen.power_raises, pen.continuous))
-        # On this plotter the GRBL X channel drives the portal (screen up/down),
-        # while the GRBL Y channel drives the pen carriage (screen left/right).
-        self.swap = tk.BooleanVar(value=True)
-        # The carriage motor is mounted so positive screen-right is negative GRBL Y.
+        self.pen_legend = tk.StringVar(value=connection_notice(
+            pen.enabled, pen.power_raises, pen.continuous,
+            power_limit_seconds=DLC32_MAX_ON_SECONDS if app_profile(self) == DLC32 else None))
+        # The legacy Uno maps X to the portal and Y to the carriage. Our new
+        # FluidNC YAML already maps logical X to the carriage and Y to the portal.
+        self.axis_profile = app_profile(self)
+        self.axis_preferences = {}
+        self.swap = tk.BooleanVar(value=self.axis_profile == UNO)
+        # Keep the existing direction defaults separate from axis roles;
+        # physical motor directions still need to be checked on the machine.
         self.reverse_right = tk.BooleanVar(value=True)
         self.reverse_down = tk.BooleanVar()
-        self.status = tk.StringVar(value="Не подключено · выберите DEMO для проверки без оборудования")
+        self.status = tk.StringVar(value="Не подключено · выберите USB, Wi-Fi или Демо")
         self.coordinates = tk.StringVar(value="Положение: —")
         self.paper_text = tk.StringVar(value="Размер появится после сохранения двух углов")
         self.hint = tk.StringVar(value="Эскиз A4 готов к редактированию. Для рисования подключите плату и задайте два угла листа.")
@@ -143,22 +190,48 @@ class App:
         row = ttk.Frame(connection)
         row.pack(fill="x")
         ttk.Label(row, text="1  Подключение", style="Section.TLabel").pack(side="left", padx=(0, 15))
+        self.connection_mode_buttons = []
+        for mode in ("USB", "Wi-Fi", "Демо"):
+            button = ttk.Radiobutton(row, text=mode, value=mode, variable=self.connection_mode,
+                                     command=self.change_connection_mode)
+            button.pack(side="left", padx=(0, 12))
+            self.connection_mode_buttons.append(button)
         self.profile_input = ttk.Combobox(row, textvariable=self.machine_profile,
-                                        values=tuple(PROFILE_LABELS.values()), state="readonly", width=29)
-        self.profile_input.pack(side="left", padx=(0, 8))
+                                        values=tuple(PROFILE_LABELS.values()), state="readonly", width=27)
+        self.profile_input.pack(side="left", padx=(6, 8))
         self.profile_input.bind("<<ComboboxSelected>>", self.change_machine_profile)
-        self.ports = ttk.Combobox(row, textvariable=self.port, width=24, state="readonly")
-        self.ports.pack(side="left", padx=(0, 6))
-        self.refresh_button = ttk.Button(row, text="Обновить", command=self.refresh_ports)
-        self.refresh_button.pack(side="left", padx=(0, 6))
-        self.connect_button = ttk.Button(row, text="Подключить", command=self.connect, style="Accent.TButton")
-        self.connect_button.pack(side="left")
         self.board_setup_button = ttk.Button(row, text="Настроить плату…", command=self.open_board_setup)
         self.board_setup_button.pack(side="right", padx=(8, 0))
+        target_row = ttk.Frame(connection)
+        target_row.pack(fill="x", pady=(9, 0))
+        self.connect_button = ttk.Button(target_row, text="Подключить", command=self.connect, style="Accent.TButton")
+        self.connect_button.pack(side="right", padx=(10, 0))
+        self.target_area = ttk.Frame(target_row)
+        self.target_area.pack(side="left", fill="x", expand=True)
+        self.usb_connection_frame = ttk.Frame(self.target_area)
+        ttk.Label(self.usb_connection_frame, text="USB-порт").pack(side="left", padx=(0, 8))
+        self.ports = ttk.Combobox(self.usb_connection_frame, textvariable=self.usb_port, width=24, state="readonly")
+        self.ports.pack(side="left", padx=(0, 6))
+        self.ports.bind("<<ComboboxSelected>>", self.select_connection_target)
+        self.refresh_button = ttk.Button(self.usb_connection_frame, text="Обновить", command=self.refresh_ports)
+        self.refresh_button.pack(side="left")
+        self.wifi_connection_frame = ttk.Frame(self.target_area)
+        ttk.Label(self.wifi_connection_frame, text="Плата").pack(side="left", padx=(0, 8))
+        self.wifi_boards = ttk.Combobox(self.wifi_connection_frame, textvariable=self.wifi_target, width=38, state="readonly")
+        self.wifi_boards.pack(side="left", padx=(0, 6))
+        self.wifi_boards.bind("<<ComboboxSelected>>", self.select_connection_target)
+        self.wifi_search_button = ttk.Button(self.wifi_connection_frame, text="Найти плату", command=self.find_wifi_boards)
+        self.wifi_search_button.pack(side="left")
+        self.demo_connection_frame = ttk.Frame(self.target_area)
+        ttk.Label(self.demo_connection_frame, text="Проверка интерфейса без оборудования").pack(side="left")
+        self.demo_connection_frame.pack(fill="x")
         self.status_label = ttk.Label(connection, textvariable=self.status, foreground="#17633f")
         self.status_label.pack(anchor="w", pady=(9, 2))
-        ttk.Label(connection, text="DEMO — без оборудования. USB: COM-порт. Wi-Fi: tcp://192.168.0.1:23. MKS питается от 12 В; первый пуск — без исполнителей.",
-                  style="Muted.TLabel").pack(anchor="w")
+        self.connection_help_label = ttk.Label(connection, textvariable=self.connection_help,
+                                                style="Muted.TLabel", wraplength=900)
+        self.connection_help_label.pack(anchor="w")
+        self.wifi_status_label = ttk.Label(connection, textvariable=self.wifi_status,
+                                           style="Muted.TLabel", wraplength=900)
         ttk.Label(outer, text="2  Задайте лист     →     3  Подготовьте рисунок     →     4  Запустите рисование",
                   style="Steps.TLabel").pack(anchor="w", pady=(13, 10))
 
@@ -223,7 +296,10 @@ class App:
             button.grid(row=r, column=c, padx=3, pady=2)
             self.jog_buttons.append(button)
         ttk.Label(jog, textvariable=self.coordinates, wraplength=285).pack(anchor="w", pady=(6, 2))
-        ttk.Label(jog, text="Один клик = один шаг. Начните с 1 мм и проверьте направления.",
+        self.jog_lift_button = ttk.Checkbutton(jog, text="Поднимать ручку при\nперемещении стрелками",
+                                               variable=self.jog_lift, command=self.update_controls)
+        self.jog_lift_button.pack(anchor="w", pady=(5, 3))
+        ttk.Label(jog, textvariable=self.jog_lift_hint,
                   style="Muted.TLabel", wraplength=280).pack(anchor="w")
 
         corners = ttk.LabelFrame(control_left, text="2  Лист по двум углам", padding=10)
@@ -242,6 +318,11 @@ class App:
         setup.pack(fill="x", pady=(0, 10))
         self.configure_button = ttk.Button(setup, text="Проверить конфигурацию FluidNC", command=self.configure)
         self.configure_button.pack(fill="x")
+        ttk.Label(setup, textvariable=self.wiring_text, wraplength=280,
+                  style="Muted.TLabel").pack(anchor="w", pady=(5, 0))
+        self.check_endstops_button = ttk.Button(setup, text="Проверить концевики", command=self.check_endstops)
+        self.check_endstops_button.pack(fill="x", pady=(5, 0))
+        ttk.Label(setup, textvariable=self.endstop_text, wraplength=280).pack(anchor="w", pady=(5, 0))
         self.unlock_button = ttk.Button(setup, text="Снять аварию MKS…", command=self.unlock_alarm)
         self.unlock_button.pack(fill="x", pady=(5, 0))
         self.hold_button = ttk.Checkbutton(setup, text="Удерживать моторы в простое", variable=self.hold, command=self.change_hold)
@@ -501,20 +582,159 @@ class App:
         return self.editor_snapshot()
 
     def refresh_ports(self):
+        if self.connected or self.controller.busy:
+            return
         from serial.tools import list_ports
-        current = self.port.get()
-        network = [current] if app_profile(self) == DLC32 and current.startswith("tcp://") else []
-        choices = ["DEMO"] + network + [port.device for port in list_ports.comports()]
+        choices = [port.device for port in list_ports.comports()
+                   if re.fullmatch(r"COM[1-9]\d*", port.device, re.I)]
         self.ports["values"] = choices
-        if self.port.get() not in choices:
-            self.port.set("DEMO")
+        if self.usb_port.get() not in choices:
+            self.usb_port.set(choices[0] if choices else "")
+        self.select_connection_target()
+
+    def wifi_worker_active(self):
+        return self.wifi_search_thread is not None and self.wifi_search_thread.is_alive()
+
+    def cancel_wifi_search(self, *, clear_results=False):
+        if self.wifi_search_cancel is not None:
+            self.wifi_search_cancel.set()
+        self.wifi_search_token = None
+        self.wifi_searching = False
+        if clear_results:
+            self.wifi_devices = {}
+            self.wifi_target.set("")
+            self.wifi_boards["values"] = ()
+            if not self.connected and self.connection_mode.get() == "Wi-Fi":
+                self.port.set("")
+
+    def change_connection_mode(self):
+        if self.connected or self.controller.busy or self.svg_loading:
+            self.connection_mode.set(self.active_connection_mode)
+            return
+        mode = self.connection_mode.get()
+        if mode not in ("USB", "Wi-Fi", "Демо"):
+            self.connection_mode.set(self.active_connection_mode)
+            return
+        self.cancel_wifi_search(clear_results=True)
+        self.active_connection_mode = mode
+        if mode == "Wi-Fi" and app_profile(self) != DLC32:
+            self.machine_profile.set(PROFILE_LABELS[DLC32])
+            self.change_machine_profile()
+        for frame in (self.usb_connection_frame, self.wifi_connection_frame, self.demo_connection_frame):
+            frame.pack_forget()
+        self.wifi_status_label.pack_forget()
+        if mode == "USB":
+            self.usb_connection_frame.pack(fill="x")
+            self.connection_help.set("Подключите плату USB-кабелем, выберите её COM-порт и нажмите «Подключить».")
+        elif mode == "Wi-Fi":
+            self.wifi_connection_frame.pack(fill="x")
+            self.wifi_status_label.pack(anchor="w", pady=(2, 0))
+            self.connection_help.set("Сначала подключите ноутбук к сети FluidNC или общему роутеру, затем нажмите «Найти плату».")
+            self.wifi_status.set("Поиск проверяет платы в вашей сети. Подключение выполняется отдельной кнопкой." if MDNS_AVAILABLE else
+                                 "Доступны точка доступа FluidNC, поиск по имени и сохранённые платы; расширенный поиск в сети роутера ограничен.")
+        else:
+            self.demo_connection_frame.pack(fill="x")
+            self.connection_help.set("Демо работает без платы и не отправляет команды оборудованию.")
+        self.select_connection_target()
+
+    def connection_target(self):
+        mode = self.connection_mode.get()
+        if mode == "Демо":
+            return "DEMO"
+        if mode == "USB":
+            port = self.usb_port.get()
+            if not re.fullmatch(r"COM[1-9]\d*", port, re.I):
+                raise ValueError("USB-порт не найден. Подключите плату и нажмите «Обновить».")
+            return port.upper()
+        if mode == "Wi-Fi":
+            endpoint = self.wifi_devices.get(self.wifi_target.get())
+            if endpoint is None:
+                raise ValueError("Нажмите «Найти плату» и выберите найденную FluidNC.")
+            if app_profile(self) != DLC32:
+                raise ValueError("Wi-Fi работает с профилем MKS DLC32 / FluidNC.")
+            return endpoint
+        raise ValueError("Выберите USB, Wi-Fi или Демо.")
+
+    def select_connection_target(self, event=None):
+        if not self.connected and not self.controller.busy:
+            try:
+                self.port.set(self.connection_target())
+            except ValueError:
+                self.port.set("")
+        self.update_controls()
+
+    def find_wifi_boards(self):
+        if (self.closed or self.connected or self.controller.busy or self.svg_loading or
+                self.connection_mode.get() != "Wi-Fi" or self.wifi_worker_active()):
+            return False
+        self.cancel_wifi_search(clear_results=True)
+        token, cancel = object(), threading.Event()
+        self.wifi_search_token, self.wifi_search_cancel = token, cancel
+        self.wifi_searching = True
+        self.wifi_status.set("Ищу и проверяю FluidNC в сети…")
+        self.port.set("")
+        events = self.wifi_events
+        remembered = tuple(self.remembered_wifi)
+
+        def discover():
+            try:
+                result = discover_fluidnc(cancel, remembered=remembered, timeout=4.0)
+            except Exception as exc:
+                events.put((token, None, str(exc)))
+            else:
+                events.put((token, result, None))
+
+        self.wifi_search_thread = threading.Thread(target=discover, daemon=True)
+        self.wifi_search_thread.start()
+        self.update_controls()
+        return True
+
+    def pump_wifi_results(self):
+        while True:
+            try:
+                token, devices, error = self.wifi_events.get_nowait()
+            except queue.Empty:
+                return
+            if token is not self.wifi_search_token or self.connection_mode.get() != "Wi-Fi":
+                continue
+            self.wifi_search_token = None
+            self.wifi_searching = False
+            if error:
+                self.wifi_status.set("Поиск не завершён: " + error + ". Проверьте сеть ноутбука и повторите поиск.")
+                continue
+            from network_transport import parse_tcp_endpoint
+            self.wifi_devices = {}
+            for device in devices or ():
+                try:
+                    endpoint = parse_tcp_endpoint(device.endpoint).url
+                except (AttributeError, ValueError):
+                    continue
+                if endpoint in self.wifi_devices.values():
+                    continue
+                label = str(device.label).strip() or "FluidNC"
+                if label in self.wifi_devices:
+                    label += " · " + endpoint.removeprefix("tcp://")
+                self.wifi_devices[label] = endpoint
+            labels = tuple(self.wifi_devices)
+            self.wifi_boards["values"] = labels
+            self.wifi_target.set(labels[0] if len(labels) == 1 else "")
+            if labels:
+                self.wifi_status.set("Найдена FluidNC. Нажмите «Подключить»." if len(labels) == 1 else
+                                     f"Найдено плат: {len(labels)}. Выберите свою и нажмите «Подключить».")
+            else:
+                self.wifi_status.set("FluidNC не найдена. Проверьте питание платы и сеть ноутбука, затем повторите поиск." +
+                                     (" Расширенный поиск в сети роутера недоступен в этой установке приложения." if not MDNS_AVAILABLE else ""))
+            self.select_connection_target()
 
     def submit(self, action, **params):
         if self.closed:
             return False
         params.setdefault("axes", self.axes())
+        if action == "jog":
+            # The same explicit manual policy applies to arrows and DWIN.
+            params.setdefault("lift_pen", self.jog_lift.get())
         try:
-            if action not in ("disconnect","configure","hold","clear","unlock"):
+            if action not in ("disconnect","configure","hold","clear","unlock","check_endstops"):
                 params.setdefault("pen", self.read_pen_settings().as_dict())
         except ValueError as exc:
             messagebox.showerror("Настройки ручки",str(exc),parent=self.root)
@@ -525,6 +745,20 @@ class App:
         return False
 
     def connect(self):
+        if self.closed or self.controller.busy or self.svg_loading:
+            return False
+        if self.connected:
+            self.submit("disconnect")
+            return
+        if self.wifi_searching or self.wifi_worker_active():
+            self.status.set("Дождитесь завершения или остановки поиска платы.")
+            return False
+        try:
+            target = self.connection_target()
+        except ValueError as exc:
+            self.status.set(str(exc))
+            return False
+        self.port.set(target)
         if (not self.connected and self.dwin_window is not None and
                 self.dwin_window.bridge.thread is not None and self.dwin_window.bridge.thread.is_alive() and
                 self.port.get().casefold() == str(self.dwin_window.bridge.port).casefold()):
@@ -533,19 +767,7 @@ class App:
         if self.pen_observer is not None and not self.pen_observer.closed:
             messagebox.showerror("Проверка полярности","Сначала закройте окно наблюдения A3: оно может занимать USB-порт.",parent=self.root)
             return
-        if self.connected:
-            self.submit("disconnect")
-            return
         selected = app_profile(self)
-        if self.port.get().lower().startswith("tcp:"):
-            try:
-                if selected != DLC32:
-                    raise ValueError("Wi-Fi поддерживается только профилем MKS DLC32 / FluidNC.")
-                from network_transport import parse_tcp_endpoint
-                self.port.set(parse_tcp_endpoint(self.port.get()).url)
-            except ValueError as exc:
-                messagebox.showerror("Адрес платы", str(exc), parent=self.root)
-                return
         if selected == UNO and self.port.get() != "DEMO" and not messagebox.askokcancel(
                 "Перед подключением Uno",
                 "Закройте другие программы управления. Открытие USB может сбросить Uno. "
@@ -557,6 +779,18 @@ class App:
     def change_machine_profile(self, event=None):
         if self.connected or self.controller.busy:
             return
+        selected = app_profile(self)
+        if selected == UNO and self.connection_mode.get() == "Wi-Fi":
+            self.connection_mode.set("USB")
+            self.change_connection_mode()
+        if selected != self.axis_profile:
+            self.axis_preferences[self.axis_profile] = (
+                self.swap.get(), self.reverse_right.get(), self.reverse_down.get())
+            swap, right, down = self.axis_preferences.get(selected, (selected == UNO, True, False))
+            self.swap.set(swap)
+            self.reverse_right.set(right)
+            self.reverse_down.set(down)
+            self.axis_profile = selected
         # Relay pin and logic voltage differ even when the mechanical lift is
         # unchanged. Confirmation on the Uno does not verify a rewired DLC32.
         pen = self.stored_pen_settings()
@@ -573,9 +807,8 @@ class App:
             messagebox.showerror("Сохранение профиля", str(exc), parent=self.root)
         self.pen_firmware = None
         self.settings = {}
-        self.hint.set("MKS по Wi-Fi: в поле порта введите tcp://IP-платы:23. ПК и плата должны быть в одной локальной сети. "
-                      "Адрес не выбирается автоматически." if app_profile(self) == DLC32 else
-                      "Для Uno выберите его COM-порт. DEMO не подключает оборудование.")
+        self.hint.set("Выберите USB, Wi-Fi или Демо в блоке подключения. Для Wi-Fi сначала найдите плату в сети." if selected == DLC32 else
+                      "Для Uno выберите USB и его COM-порт. Демо работает без оборудования.")
         self.update_controls()
 
     def stored_pen_settings(self):
@@ -668,7 +901,9 @@ class App:
         except (ValueError,OSError) as exc:
             messagebox.showerror("Настройки ручки",str(exc),parent=self.root)
             return
-        self.pen_legend.set(connection_notice(pen.enabled, pen.power_raises, pen.continuous))
+        self.pen_legend.set(connection_notice(
+            pen.enabled, pen.power_raises, pen.continuous,
+            power_limit_seconds=DLC32_MAX_ON_SECONDS if app_profile(self) == DLC32 else None))
         self.preview_revision += 1
         self.invalidate_editor()
         self.update_controls()
@@ -719,6 +954,11 @@ class App:
                 "Первую проверку 100% выполняйте без ручки.", parent=self.root):
             self.submit("configure", hold=self.hold.get())
 
+    def check_endstops(self):
+        if not self.connected or self.simulation or self.effective_machine_profile() != DLC32:
+            return
+        self.submit("check_endstops")
+
     def unlock_alarm(self):
         if (self.effective_machine_profile() != DLC32 or self.simulation or not self.connected or
                 self.controller.busy or self.controller.cancelled.is_set()):
@@ -759,7 +999,7 @@ class App:
     def jog(self, dx, dy):
         try:
             step = self.get_step()
-            self.submit("jog", delta=(dx * step, dy * step), feed=self.get_feed())
+            return self.submit("jog", delta=(dx * step, dy * step), feed=self.get_feed())
         except ValueError as exc:
             messagebox.showerror("Проверьте ввод", str(exc), parent=self.root)
 
@@ -846,7 +1086,9 @@ class App:
                 f"Область: {self.sheet.width:.1f} × {self.sheet.height:.1f} мм.\n\n"
                 "Установите ручку, не сдвигая оси. Проверьте крепление листа и свободный ход механики.\n"
                 + ("Оранжевые переходы выполняются с поднятой ручкой. После завершения питание соленоида отключится. "
-                   + ("Ручка останется внизу в последней точке.\n" if self.pen_power_raises.get() else
+                   + (f"Переходы выполняются целиком. Лимит питания катушки — {DLC32_MAX_ON_SECONDS:g} с.\n"
+                      if app_profile(self) == DLC32 and not self.pen_continuous.get() else
+                      "Ручка останется внизу в последней точке.\n" if self.pen_power_raises.get() else
                       "Без пауз охлаждения.\n" if self.pen_continuous.get() else "Будут паузы охлаждения.\n") if self.pen_enabled.get() else
                    "Автоподъём отключён: все оранжевые переходы тоже будут нарисованы. БП соленоида держите отключённым.\n")+
                 "Возврата в угол после завершения нет.\n\n"
@@ -866,6 +1108,7 @@ class App:
             messagebox.showerror("Проверьте ввод", str(exc), parent=self.root)
 
     def stop(self):
+        self.cancel_wifi_search(clear_results=True)
         self.dwin_pen_state = 0
         self.preserve_draft()
         self.preview_revision += 1
@@ -883,16 +1126,53 @@ class App:
 
     def update_controls(self):
         busy = self.controller.busy or self.svg_loading
+        connection_locked = busy or self.connected
+        searching = self.wifi_searching or self.wifi_worker_active()
+        try:
+            self.connection_target()
+            has_target = True
+        except ValueError:
+            has_target = False
         available = self.connected and not busy and not self.controller.cancelled.is_set()
         ready = available and self.machine_ready()
         motion_ready = ready and self.pen_ready()
         drawing_ready = motion_ready and self.zero and self.sheet is not None
+        if not self.pen_enabled.get():
+            self.jog_lift.set(False)
+        self.jog_lift_button.configure(state="normal" if not busy and self.pen_enabled.get() else "disabled")
+        bounded_fluidnc = app_profile(self) == DLC32 and not self.pen_continuous.get()
+        if not self.jog_lift.get():
+            jog_hint = ("Стрелки двигают только моторы. Перед нажатием поднимите или выньте ручку вручную. "
+                        "Один клик = один ход. Начните с 1 мм.")
+        elif bounded_fluidnc:
+            jog_hint = ("Ручка поднимается на весь ход стрелки. Один клик = один ход. "
+                        f"Лимит питания катушки — {DLC32_MAX_ON_SECONDS:g} с; после остановки питание выключается.")
+        elif self.pen_continuous.get():
+            jog_hint = ("Ручка поднимается на весь ход стрелки. Один клик = один ход; "
+                        "после остановки питание выключается.")
+        else:
+            jog_hint = ("Ручка поднимается на весь ход стрелки. Один клик = один ход. "
+                        "В режиме краткого питания большой шаг может быть отклонён до движения.")
+        self.jog_lift_hint.set(jog_hint)
+        self.endstop_text.set(endstop_summary(self.endstop_report))
+        if app_profile(self) == DLC32:
+            text = "Схема подключения: X + Z - портал; Y1 - каретка."
+            if self.settings.get("_fluidnc_wiring") == "neiroslopper_ttl":
+                text += " В YAML: X - каретка, Y - портал."
+            elif self.settings.get("_fluidnc_wiring") == "legacy_xy":
+                text += " Загружен YAML прежней разводки; он не подтверждает эту схему."
+            self.wiring_text.set(text)
+        else:
+            self.wiring_text.set("")
         power_raises = self.pen_power_raises.get()
         self.pen_effect.set("Поднимает" if power_raises else "Опускает")
         self.pen_summary.set(("Питание поднимает" if power_raises else "Питание опускает") +
                              (" · выход " + self.pen_active.get() if self.pen_active.get() != "Не проверено" else " · полярность не задана") +
-                             (" · непрерывный ход" if self.pen_continuous.get() else ""))
-        self.pen_legend.set(connection_notice(self.pen_enabled.get(), power_raises, self.pen_continuous.get()))
+                             (" · непрерывный ход" if self.pen_continuous.get() else
+                              f" · катушка до {DLC32_MAX_ON_SECONDS:g} с" if bounded_fluidnc else ""))
+        self.pen_legend.set(connection_notice(
+            self.pen_enabled.get(), power_raises, self.pen_continuous.get(),
+            power_limit_seconds=DLC32_MAX_ON_SECONDS if app_profile(self) == DLC32 else None))
         if self.relay_state_unknown:
             self.pen_status.set("Состояние реле неизвестно: подтверждение отключения не получено. При необходимости выключите БП соленоида вручную.")
         elif not self.pen_enabled.get():
@@ -909,8 +1189,11 @@ class App:
                                 "Автоподъём готов. Тест кратковременный, оси не движутся.")
         self.connect_button.configure(text="Отключить" if self.connected else "Подключить")
         for widget, enabled in (
-                (self.connect_button, not busy), (self.refresh_button, not busy and not self.connected),
+                (self.connect_button, not busy and (self.connected or (has_target and not searching))),
+                (self.refresh_button, not connection_locked and self.connection_mode.get() == "USB"),
+                (self.wifi_search_button, not connection_locked and not searching and self.connection_mode.get() == "Wi-Fi"),
                 (self.configure_button, available), (self.board_setup_button, not busy),
+                (self.check_endstops_button, available and self.effective_machine_profile() == DLC32 and not self.simulation),
                 (self.first_button, motion_ready and not self.zero),
                 (self.unlock_button, ready and self.effective_machine_profile() == DLC32 and not self.simulation),
                 (self.hold_button, not busy and self.effective_machine_profile() == UNO),
@@ -927,12 +1210,16 @@ class App:
         self.pen_polarity.configure(state="readonly" if not busy else "disabled")
         self.pen_effect_combo.configure(state="readonly" if not busy else "disabled")
         for widget in (self.pen_up_button,self.pen_pulse_button):
-            widget.configure(state="normal" if ready and self.pen_test_ready() else "disabled")
+            # An isolated relay pulse does not depend on XY calibration. The
+            # worker still checks the actual relay mapping and controller Idle.
+            widget.configure(state="normal" if available and self.pen_test_ready() else "disabled")
         for widget in self.axis_widgets:
             widget.configure(state="normal" if not busy and not self.zero else "disabled")
-        self.ports.configure(state=("normal" if self.effective_machine_profile() == DLC32 else "readonly")
-                             if not busy and not self.connected else "disabled")
-        self.profile_input.configure(state="readonly" if not busy and not self.connected else "disabled")
+        for button in self.connection_mode_buttons:
+            button.configure(state="disabled" if connection_locked else "normal")
+        self.ports.configure(state="readonly" if not connection_locked and self.connection_mode.get() == "USB" else "disabled")
+        self.wifi_boards.configure(state="readonly" if not connection_locked and not searching and self.connection_mode.get() == "Wi-Fi" else "disabled")
+        self.profile_input.configure(state="readonly" if not connection_locked else "disabled")
         self.configure_button.configure(text="Проверить конфигурацию FluidNC" if self.effective_machine_profile() == DLC32
                                         else "Настроить без концевиков")
         self.step_input.configure(state="normal" if not busy else "disabled")
@@ -1024,6 +1311,7 @@ class App:
     def pump(self):
         if self.closed:
             return
+        self.pump_wifi_results()
         redraw = False
         latest_position = latest_progress = None
         for _ in range(500):
@@ -1039,6 +1327,13 @@ class App:
                 self.status.set("DEMO · симуляция, USB не используется" if self.simulation else
                                 f"{value} · {PROFILE_LABELS[self.effective_machine_profile()]} подключён")
                 self.note("Подключено: " + value + ". Ноль нужно выставить заново.")
+                if str(value).lower().startswith("tcp://"):
+                    try:
+                        remember_verified_endpoint(self.data_dir, value)
+                    except (OSError, ValueError) as exc:
+                        self.note("Подключение работает; адрес платы не сохранён: " + str(exc))
+                    else:
+                        self.remembered_wifi = [value] + [item for item in self.remembered_wifi if item != value][:7]
             elif name == "disconnected":
                 self.dwin_pen_state = 0
                 self.preserve_draft()
@@ -1049,6 +1344,7 @@ class App:
                 self.port_name = ""
                 self.simulation = False
                 self.settings = {}
+                self.endstop_report = None
                 self.pen_firmware = None
                 self.sheet = self.position = None
                 self.relay_state_unknown = True
@@ -1078,6 +1374,7 @@ class App:
                 power_raises = self.pen_power_raises.get()
                 text = {"up":"Команда подъёма: питание " + ("включено." if power_raises else "выключено."),
                         "down":"Команда опускания: питание " + ("выключено." if power_raises else "включено."),
+                        "off":"Питание соленоида выключено для ручного перемещения.",
                         "cooling":"Питание выключено: пауза охлаждения. " + ("Ручка внизу." if power_raises else "Ожидается подъём ручки."),
                         "unknown":"Состояние реле неизвестно: доставка сброса не подтверждена. При обрыве связи отключите силовое питание вручную."}.get(value,str(value))
                 self.pen_status.set(text + " Положение датчиком не измеряется.")
@@ -1085,6 +1382,8 @@ class App:
                 state, self.position = value
                 latest_position = value
                 redraw = True
+            elif name == "endstops":
+                self.endstop_report = value
             elif name == "calibration":
                 self.preserve_draft()
                 self.preview_revision += 1
@@ -1139,6 +1438,9 @@ class App:
                     text = ("Windows прервала доступ к USB-порту. Рисунок сохранён; перед новым запуском восстановите связь и задайте оба угла.\n\n"
                             "Технические подробности: " + text)
                 self.note("ОШИБКА: " + text)
+                # A preceding disconnect event already invalidated the session.
+                # Refresh its controls before the modal dialog pauses this pump.
+                self.update_controls()
                 messagebox.showerror("Операция остановлена", text, parent=self.root)
             elif name == "log":
                 self.note(value)
@@ -1181,6 +1483,7 @@ class App:
                 "Операция выполняется. Будет отправлен сброс; ноль потеряется. Закрыть?", parent=self.root):
             return
         self.closed = True
+        self.cancel_wifi_search()
         # Auxiliary windows and autosaves can wait for workers. Stop motion
         # before any of those waits, as soon as closing is accepted.
         self.controller.shutdown()

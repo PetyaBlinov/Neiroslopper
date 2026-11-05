@@ -89,7 +89,7 @@ def save_settings(directory,settings):
     temporary.replace(target)
 
 
-def connection_notice(enabled=False, power_raises=False, continuous=False):
+def connection_notice(enabled=False, power_raises=False, continuous=False, *, power_limit_seconds=None):
     if enabled:
         if continuous:
             return ('Оранжевый — переходы с поднятым пером, без дробления и пауз охлаждения. '
@@ -97,6 +97,11 @@ def connection_notice(enabled=False, power_raises=False, continuous=False):
                     + ('После остановки питание выключено, ручка опущена.' if power_raises else
                        'После остановки питание выключено, ручка поднята.'))
         if power_raises:
+            if power_limit_seconds is not None:
+                return ('Оранжевый — цельные переходы с поднятым пером. '
+                        f'Питание катушки — до {power_limit_seconds:g} с за раз; '
+                        'после остановки оно выключается, ручка опускается. '
+                        'Обязательных пауз охлаждения между переходами нет.')
             return ('Оранжевый — переходы с поднятым пером: питание поднимает ручку. '
                     'В паузах охлаждения она опускается на месте; возможны точки. '
                     'После остановки соленоид выключен, ручка опущена.')

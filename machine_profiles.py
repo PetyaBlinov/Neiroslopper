@@ -76,10 +76,13 @@ def assistant_facts(selected):
         'machine_profile': selected,
         'controller_board': 'MKS DLC32 v2.2' if selected == DLC32 else 'Arduino Uno + CNC Shield V3',
         'controller_firmware': 'Official FluidNC' if selected == DLC32 else 'GRBL 1.1',
-        'motor_socket_roles': 'Read actual config.yaml; optional dual-X requires explicit wiring verification',
-        'pen_output_profile': 'Actual coolant/flood_pin and polarity from config.yaml; relay wiring must be checked',
+        'motor_socket_roles': ('Planned wiring: physical X + Z drive the portal (logical Y), physical Y1 drives '
+                               'the pen carriage (logical X), Y2 unused; read actual config.yaml'),
+        'pen_output_profile': ('Planned relay input: LASER TTL S / GPIO32, digital coolant M8/M9; '
+                               'read actual config.yaml and verify active level'),
         'holding_configuration': 'stepping/idle_ms in config.yaml' if selected == DLC32 else 'GRBL $1',
-        'endstop_configuration': 'Read actual config.yaml; no assumed switches or homing',
+        'endstop_configuration': ('Planned NC switches: LIMIT X/GPIO36 carriage, LIMIT Y/GPIO35 portal; '
+                                  'read actual config.yaml; homing is explicit, never automatic'),
         'dwin_connection': 'Custom JD-DGUS firmware required; not included in official FluidNC',
     }
 
@@ -204,8 +207,22 @@ def fluidnc_configuration(lines, legacy=None):
         if message not in reasons:
             reasons.append(message)
 
-    axes = config.get('axes')
-    axes = axes if isinstance(axes, dict) else {}
+    meta = config.get('meta')
+    if isinstance(meta, str) and meta.startswith('NEIROSLOPPER_COMMISSIONING '):
+        reject('Пусковая конфигурация: сначала проверить направления моторов, масштаб и реле.')
+
+    # Config dumps use canonical uppercase axis names; generators also accept
+    # lowercase YAML. Normalize only the local X/Y/Z view, keeping the original
+    # dump intact and rejecting case-colliding entries rather than hiding one.
+    raw_axes = config.get('axes')
+    axes = {}
+    if isinstance(raw_axes, dict):
+        for key, axis in raw_axes.items():
+            normalized = key.lower() if key in ('X', 'Y', 'Z') else key
+            if normalized in axes:
+                reject('Повторяющаяся ось с разным регистром: ' + str(key).upper() + '.')
+            else:
+                axes[normalized] = axis
     if not axes:
         reject('Не заданы физические оси X и Y.')
     if config.get('report_inches', False) is not False:
@@ -217,8 +234,8 @@ def fluidnc_configuration(lines, legacy=None):
     start = config.get('start') or {}
     if not isinstance(start, dict):
         reject('Некорректный раздел start.')
-    elif start.get('must_home', False) is not False:
-        reject('В этой версии используется ручная установка листа; start/must_home должен быть false.')
+    elif type(start.get('must_home', False)) is not bool:
+        reject('start/must_home должен быть true или false.')
     macros = config.get('macros') or {}
     if not isinstance(macros, dict):
         reject('Некорректный раздел macros.')
@@ -230,8 +247,10 @@ def fluidnc_configuration(lines, legacy=None):
         reject('Обнаружена автоматическая команда вне раздела macros.')
 
     stepping = config.get('stepping') or {}
-    if not isinstance(stepping, dict) or str(stepping.get('engine', '')).upper() != 'I2S_STATIC':
-        reject('Физические драйверы DLC32 требуют проверенного I2S_STATIC, а не тестовых null_motor.')
+    # FluidNC 4.1.1 accepts I2S_STATIC in YAML but reports its canonical
+    # engine name as I2S in $Config/Dump. Both use the same checked bus/motors.
+    if not isinstance(stepping, dict) or str(stepping.get('engine', '')).upper() not in ('I2S', 'I2S_STATIC'):
+        reject('Физические драйверы DLC32 требуют I2S (I2S_STATIC), а не тестовых null_motor.')
     result[1] = stepping.get('idle_ms', 0) if isinstance(stepping, dict) else 0
     i2s = config.get('i2so') or {}
     if not isinstance(i2s, dict) or any(not _pin_is(i2s.get(key), value) or
@@ -245,7 +264,24 @@ def fluidnc_configuration(lines, legacy=None):
     hard_limits = False
     soft_limits = False
     homing_enabled = False
+    homing_axes = []
     actual_motors = 0
+    # Physical socket labels need not match G-code axes. The accepted new
+    # installation uses Y1 for the pen carriage (X), X + Z for the portal (Y).
+    # Detect the mapping from actual pins, never from a user-editable name/meta.
+    x_motor = axes.get('x', {}).get('motor0', {}) if isinstance(axes.get('x'), dict) else {}
+    x_driver = x_motor.get('stepstick', {}) if isinstance(x_motor, dict) else {}
+    new_wiring = (isinstance(x_driver, dict) and
+                  _pin_is(x_driver.get('step_pin'), 'i2so.5') and
+                  _pin_is(x_driver.get('direction_pin'), 'i2so.6'))
+    expected_layout = ({'x': [('i2so.5', 'i2so.6')],
+                        'y': [('i2so.1', 'i2so.2'), ('i2so.3', 'i2so.4')]}
+                       if new_wiring else
+                       {'x': [('i2so.1', 'i2so.2'), ('i2so.3', 'i2so.4')],
+                        'y': [('i2so.5', 'i2so.6')]})
+    result['_fluidnc_wiring'] = 'neiroslopper_ttl' if new_wiring else 'legacy_xy'
+    result['_fluidnc_endstops'] = {}
+    claimed_limits = set()
     for index, name in enumerate(('x', 'y')):
         axis = axes.get(name)
         if not isinstance(axis, dict):
@@ -268,11 +304,23 @@ def fluidnc_configuration(lines, legacy=None):
             reject('soft_limits должен быть true или false.')
         soft_limits |= axis.get('soft_limits', False) is True
         homing = axis.get('homing') or {}
-        homing_enabled |= isinstance(homing, dict) and type(homing.get('cycle')) is int and homing['cycle'] > 0
-        expected = [('i2so.1', 'i2so.2'), ('i2so.3', 'i2so.4')] if name == 'x' else [('i2so.5', 'i2so.6')]
+        axis_homing = isinstance(homing, dict) and type(homing.get('cycle')) is int and homing['cycle'] > 0
+        homing_enabled |= axis_homing
+        if axis_homing:
+            homing_axes.append(name)
+            positive = homing.get('positive_direction', False)
+            if type(positive) is not bool:
+                reject('Направление поиска ' + name.upper() + ' должно быть true или false.')
+            # These are mandatory for a controller-owned homing move; blank or
+            # non-finite values must not become a usable runtime configuration.
+            for key in ('feed_mm_per_min', 'seek_mm_per_min'):
+                if not _positive(homing.get(key)):
+                    reject('Для homing ' + name.upper() + ' нужен положительный ' + key + '.')
+        expected = expected_layout[name]
+        axis_limit_pins = []
         for motor_index, (step, direction) in enumerate(expected):
             motor = axis.get('motor' + str(motor_index))
-            if motor_index and not _motor_active(motor):
+            if motor_index and not _motor_active(motor) and not (new_wiring and name == 'y'):
                 continue
             if not isinstance(motor, dict) or not isinstance(motor.get('stepstick'), dict):
                 reject('Ось ' + name.upper() + '/motor' + str(motor_index) + ': нужен физический stepstick.')
@@ -295,9 +343,31 @@ def fluidnc_configuration(lines, legacy=None):
                 pin, flags = _pin(motor.get(key, 'NO_PIN'))
                 if pin != 'no_pin' and (pin not in ('gpio.34', 'gpio.35', 'gpio.36') or set(flags) - {'high', 'low'}):
                     reject('Неподдерживаемый контакт концевика ' + name.upper() + '/' + key + '.')
+                if pin != 'no_pin':
+                    axis_limit_pins.append(pin)
+                    if pin in claimed_limits:
+                        reject('Один вход концевика назначен нескольким моторам: ' + pin + '.')
+                    claimed_limits.add(pin)
+                    if new_wiring and (motor_index != 0 or pin != ('gpio.36' if name == 'x' else 'gpio.35')):
+                        reject('По новой схеме LIMIT X/GPIO36 относится к каретке, LIMIT Y/GPIO35 - к порталу motor0.')
+                    if axis_homing and key == ('limit_neg_pin' if positive else 'limit_pos_pin'):
+                        reject('Концевик ' + name.upper() + ' находится с противоположной стороны от направления поиска.')
+            if axis_homing and 'pulloff_mm' in motor and not _positive(motor['pulloff_mm']):
+                reject('Отход после homing должен быть положительным: ' + name.upper() + '.')
+        result['_fluidnc_endstops'][name] = tuple(axis_limit_pins)
+        if axis_homing and not axis_limit_pins:
+            reject('Поиск начала ' + name.upper() + ' включён без концевика.')
+        if axis_homing and new_wiring and name == 'y':
+            motors = [axis.get('motor0', {}), axis.get('motor1', {})]
+            if all(isinstance(motor, dict) for motor in motors):
+                pull = [motor.get('pulloff_mm', 1.0) for motor in motors]
+                if pull[0] != pull[1]:
+                    reject('Два мотора портала с общим концевиком должны иметь одинаковый pulloff_mm.')
         for key, motor in axis.items():
             if re.fullmatch(r'motor\d+', str(key)) and int(key[5:]) >= len(expected) and _motor_active(motor):
                 reject('Лишний активный мотор оси ' + name.upper() + '.')
+    if isinstance(start, dict) and start.get('must_home') is True and set(homing_axes) != {'x', 'y'}:
+        reject('Обязательное базирование требует настроенного homing обеих осей X/Y.')
     for name, axis in axes.items():
         if name in ('x', 'y', 'shared_stepper_disable_pin', 'shared_stepper_reset_pin', 'homing_runs'):
             continue
@@ -316,6 +386,8 @@ def fluidnc_configuration(lines, legacy=None):
     else:
         base, flags = _pin(coolant.get('flood_pin', 'NO_PIN'))
         if base != 'no_pin':
+            if new_wiring and base != 'gpio.32':
+                reject('В новой разводке реле подключено к LASER TTL/GPIO32, а не к SCL или входу PROBE.')
             # ESP32 pins 34..39 are input-only; GPIO0 is a boot strap, GPIO1/3
             # own the USB UART, GPIO6..11 own flash; GPIO16/17/21 own I2S here.
             allowed = {2, 4, 5, 12, 13, 14, 15, 18, 19, 22, 23, 25, 26, 27, 32, 33}

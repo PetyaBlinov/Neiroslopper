@@ -1,5 +1,6 @@
 """Sender regressions using a protocol fake; no serial device is opened."""
 import sys
+import copy
 import threading
 import time
 import unittest
@@ -12,6 +13,7 @@ from geometry import Axes
 from machine_profiles import DLC32, settings_ready
 from pen_lift import PenLiftSettings
 from serial_trace import TransportError
+import yaml
 
 
 PHYSICAL_CONFIG = """name: Existing Plotter
@@ -156,6 +158,35 @@ class SenderTests(unittest.TestCase):
         self.assertEqual(session.pen_firmware["flood_pin"], "gpio.32:low")
         self.assertTrue(any(kind == "settings" for kind, _ in callbacks))
 
+    def test_alarm_three_explains_reset_without_claiming_its_source(self):
+        session, wire, _ = self.session()
+        session.trusted = True
+        session.last_command = "$J=G91 G21 X-0.500 Y-0.000 F150.0"
+        wire.queue("ALARM:3")
+        with self.assertRaises(RuntimeError) as raised:
+            session.read_line()
+        message = str(raised.exception)
+        self.assertIn("ALARM:3", message)
+        self.assertIn(session.last_command, message)
+        self.assertIn("сбросе во время движения", message)
+        self.assertIn("источник сброса не установлен", message)
+        self.assertIn("питание и USB", message)
+        self.assertIn("задайте оба угла заново", message)
+        self.assertNotIn("Проверьте механику", message)
+        self.assertEqual(wire.history, [])
+
+    def test_other_alarm_keeps_existing_generic_message(self):
+        session, wire, _ = self.session()
+        session.trusted = True
+        session.last_command = "$J=G91 G21 X1 F150"
+        wire.queue("ALARM:2")
+        with self.assertRaises(RuntimeError) as raised:
+            session.read_line()
+        self.assertEqual(str(raised.exception),
+                         f"GRBL: ALARM:2 после команды {session.last_command!r}. "
+                         "Проверьте механику и настройки; ноль сброшен.")
+        self.assertEqual(wire.history, [])
+
     def test_default_test_drive_connects_but_cannot_jog(self):
         session, wire, _ = self.session(ProtocolWire(config=DEFAULT_CONFIG))
         session.initialize()
@@ -170,6 +201,122 @@ class SenderTests(unittest.TestCase):
                                        "pen": PenLiftSettings(enabled=False)})
         self.assertFalse(any(b"$J=" in item or b"G1 " in item or b"M8" in item for item in wire.history))
         self.assertFalse(session.has_actuated)
+
+    def commissioning_relay_controller(self, *, config=None, wire=None):
+        if config is None:
+            config = yaml.safe_load(PHYSICAL_CONFIG)
+            config['meta'] = 'NEIROSLOPPER_COMMISSIONING directions and scale unverified'
+            config['start']['must_home'] = True
+            config['axes']['x']['motor0']['stepstick'].update(
+                step_pin='i2so.5', direction_pin='i2so.6')
+            config['axes']['y']['motor0']['stepstick'].update(
+                step_pin='i2so.1', direction_pin='i2so.2')
+            config['axes']['y']['motor1'] = copy.deepcopy(config['axes']['y']['motor0'])
+            config['axes']['y']['motor1']['stepstick'].update(
+                step_pin='i2so.3', direction_pin='i2so.4')
+        wire = wire or ProtocolWire(config=yaml.safe_dump(config))
+        session, wire, _ = self.session(wire)
+        session.initialize()
+        controller = Controller(start_worker=False)
+        controller.session = session
+        controller.connected = True
+        controller.machine_profile = DLC32
+        session.cancelled = controller.cancelled
+        pen = PenLiftSettings(enabled=True, active_low=True, confirmed=True,
+                              power_raises=True, continuous=False, up_ms=50, down_ms=50)
+        wire.history.clear()
+        return controller, session, wire, pen
+
+    def test_verified_relay_pulse_works_while_commissioning_xy_stays_blocked(self):
+        controller, session, wire, pen = self.commissioning_relay_controller()
+        self.assertFalse(settings_ready(session.settings, DLC32))
+        controller.execute('pen_pulse', {'pen': pen})
+        commands = [item for item in wire.history if item != b'?']
+        self.assertEqual(commands[0], b'M9\n')
+        self.assertEqual(commands.count(b'M8\n'), 1)
+        self.assertEqual(commands[-2:], [b'M9\n', b'G4 P0.050\n'])
+        self.assertIn(b'G4 P0.250\n', commands)
+        self.assertFalse(session.coil_on)
+        self.assertFalse(any(b'$J=' in item or b'G1 ' in item for item in wire.history))
+        wire.history.clear()
+        for action in ('jog', 'zero', 'corner'):
+            with self.subTest(action=action), self.assertRaises(ValueError):
+                controller.execute(action, {'pen': pen, 'axes': Axes(), 'delta': (1, 0), 'feed': 100})
+        self.assertEqual(wire.history, [])
+
+    def test_isolated_pen_up_and_power_off_do_not_require_work_coordinates(self):
+        for action in ('pen_up', 'pen_down_hold'):
+            with self.subTest(action=action):
+                controller, session, wire, pen = self.commissioning_relay_controller()
+                session.work_offset = None
+                wire.status_line = '<Idle|MPos:10,20,0|FS:0,0>'
+                controller.execute(action, {'pen': pen})
+                self.assertFalse(session.coil_on)
+                self.assertEqual([v for v in wire.history if v != b'?'][-2:],
+                                 [b'M9\n', b'G4 P0.050\n'])
+
+    def test_isolated_pen_keeps_continuous_power_guard(self):
+        controller, session, wire, pen = self.commissioning_relay_controller()
+        with self.assertRaisesRegex(ValueError, 'непрерывного профиля'):
+            controller.execute('pen_up_hold', {'pen': pen})
+        self.assertNotIn(b'M8\n', wire.history)
+
+    def test_isolated_pen_requires_confirmed_matching_relay(self):
+        for overrides in ({'confirmed': False}, {'active_low': None},
+                          {'active_low': False}, {'enabled': False}):
+            with self.subTest(overrides=overrides):
+                controller, session, wire, pen = self.commissioning_relay_controller()
+                changed = dict(pen.as_dict(), **overrides)
+                with self.assertRaises(ValueError):
+                    controller.execute('pen_pulse', {'pen': changed})
+                self.assertFalse(any(item.startswith(b'M') for item in wire.history))
+        controller, session, wire, pen = self.commissioning_relay_controller()
+        session.pen_firmware = None
+        with self.assertRaises(ValueError):
+            controller.execute('pen_pulse', {'pen': pen})
+        self.assertNotIn(b'M8\n', wire.history)
+
+    def test_isolated_pen_requires_trusted_idle_and_live_transport(self):
+        for state in ('Alarm', 'Run', 'Jog', 'Hold:0'):
+            with self.subTest(state=state):
+                controller, session, wire, pen = self.commissioning_relay_controller()
+                wire.status_line = '<' + state + '|MPos:10,20,0|FS:0,0>'
+                with self.assertRaises(ValueError):
+                    controller.execute('pen_pulse', {'pen': pen})
+                self.assertNotIn(b'M8\n', wire.history)
+        controller, session, wire, pen = self.commissioning_relay_controller()
+        session.trusted = False
+        with self.assertRaises(ValueError):
+            controller.execute('pen_pulse', {'pen': pen})
+        self.assertEqual(wire.history, [])
+        controller, session, wire, pen = self.commissioning_relay_controller()
+        wire.port, wire.closed = 'tcp://127.0.0.1:23', True
+        with self.assertRaises(RuntimeError):
+            controller.execute('pen_pulse', {'pen': pen})
+        self.assertEqual(wire.history, [])
+
+    def test_isolated_pen_rejects_pin_conflicts_even_when_xy_is_unready(self):
+        for mutate in ('laser', 'mist', 'wrong_pin'):
+            with self.subTest(mutate=mutate):
+                controller, session, wire, pen = self.commissioning_relay_controller()
+                config = session.settings['_fluidnc_config']
+                if mutate == 'laser':
+                    config['Laser'] = {'output_pin': 'GPIO.32'}
+                elif mutate == 'mist':
+                    config['coolant']['mist_pin'] = 'gpio.33'
+                else:
+                    config['coolant']['flood_pin'] = 'gpio.4:low'
+                with self.assertRaises(ValueError):
+                    controller.execute('pen_pulse', {'pen': pen})
+                self.assertNotIn(b'M8\n', wire.history)
+
+    def test_endstop_report_uses_canonical_uppercase_axes(self):
+        controller, session, wire, pen = self.commissioning_relay_controller()
+        axes = session.settings['_fluidnc_config']['axes']
+        axes['X'], axes['Y'] = axes.pop('x'), axes.pop('y')
+        axes['X']['motor0']['limit_neg_pin'] = 'GPIO.36'
+        axes['Y']['motor0']['limit_neg_pin'] = 'GPIO.35'
+        self.assertEqual(session.endstop_report()['configured'], {'x': True, 'y': True})
 
     def test_diagnostic_disconnect_does_not_reset_the_board(self):
         session, wire, _ = self.session()

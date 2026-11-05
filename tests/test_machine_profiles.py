@@ -42,6 +42,36 @@ class MachineProfileTests(unittest.TestCase):
         self.assertEqual(settings[21], 0)
         self.assertIsNone(profiles.fluidnc_pen_profile(settings))
 
+    def test_config_dump_canonical_i2s_and_yaml_alias_are_accepted(self):
+        for engine in ('I2S', 'I2S_STATIC'):
+            with self.subTest(engine=engine):
+                config = copy.deepcopy(self.config)
+                config['stepping']['engine'] = engine
+                settings = inspect(config)
+                self.assertTrue(profiles.settings_ready(settings, profiles.DLC32),
+                                settings['_fluidnc_details'])
+
+    def test_other_stepping_engines_do_not_enable_physical_motion(self):
+        for engine in ('RMT', 'I2S_STREAM', 'UNKNOWN', '', None):
+            with self.subTest(engine=engine):
+                config = copy.deepcopy(self.config)
+                config['stepping']['engine'] = engine
+                settings = inspect(config)
+                self.assertFalse(settings['_fluidnc_ready'])
+                self.assertTrue(any('I2S' in reason for reason in settings['_fluidnc_details']))
+
+    def test_axis_names_that_collide_by_case_are_rejected_in_either_order(self):
+        for first, second in (('x', 'X'), ('X', 'x')):
+            with self.subTest(first=first):
+                config = copy.deepcopy(self.config)
+                x_axis = config['axes'].pop('x')
+                config['axes'][first] = copy.deepcopy(x_axis)
+                config['axes'][second] = copy.deepcopy(x_axis)
+                settings = inspect(config)
+                self.assertFalse(settings['_fluidnc_ready'])
+                self.assertTrue(any('Повторяющаяся ось' in reason
+                                    for reason in settings['_fluidnc_details']))
+
     def test_default_test_drive_stays_diagnostic(self):
         config = {'name': 'Default (Test Drive no I/O)', 'board': 'None',
                   'stepping': {'engine': 'RMT'},
@@ -215,6 +245,148 @@ class MachineProfileTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as folder:
             profiles.save_selected_profile(folder, profiles.UNO)
             self.assertEqual(profiles.load_selected_profile(folder), profiles.UNO)
+
+
+class NewWiringInspectionTests(unittest.TestCase):
+    def setUp(self):
+        from test_wiring_setup import commissioned_parameters
+        self.config = generate_config(commissioned_parameters(hard_limits=True))
+
+    def test_three_physical_sockets_are_a_two_axis_machine(self):
+        settings = inspect(self.config)
+        self.assertTrue(settings['_fluidnc_ready'], settings['_fluidnc_details'])
+        self.assertEqual(settings['_fluidnc_wiring'], 'neiroslopper_ttl')
+        self.assertEqual(settings['_fluidnc_endstops'], {'x': ('gpio.36',), 'y': ('gpio.35',)})
+        self.assertEqual(settings[21], 1)
+        self.assertEqual(profiles.fluidnc_pen_profile(settings)['flood_pin'], 'gpio.32:low')
+
+    def canonical_dump_config(self):
+        config = copy.deepcopy(self.config)
+        config['stepping']['engine'] = 'I2S'
+
+        def uppercase_pins(node):
+            for key, value in node.items():
+                if isinstance(value, dict):
+                    uppercase_pins(value)
+                elif key.endswith('_pin') and isinstance(value, str):
+                    node[key] = value.upper()
+
+        uppercase_pins(config)
+        axes = config['axes']
+        axes['X'] = axes.pop('x')
+        axes['Y'] = axes.pop('y')
+        axes['Z'] = {'motor0': {'null_motor': {}, 'hard_limits': False,
+                             'limit_neg_pin': 'NO_PIN', 'limit_pos_pin': 'NO_PIN'}}
+        return config
+
+    def test_canonical_i2s_dump_preserves_pin_and_three_motor_checks(self):
+        config = self.canonical_dump_config()
+        before = copy.deepcopy(config)
+        settings = inspect(config)
+        self.assertTrue(settings['_fluidnc_ready'], settings['_fluidnc_details'])
+        self.assertEqual(settings['_fluidnc_wiring'], 'neiroslopper_ttl')
+        self.assertIn('X', settings['_fluidnc_config']['axes'])
+        self.assertNotIn('x', settings['_fluidnc_config']['axes'])
+        self.assertEqual(config, before)
+
+        broken_bus = copy.deepcopy(config)
+        broken_bus['i2so']['bck_pin'] = 'GPIO.18'
+        self.assertFalse(inspect(broken_bus)['_fluidnc_ready'])
+
+        missing_motor = copy.deepcopy(config)
+        del missing_motor['axes']['Y']['motor1']
+        self.assertFalse(inspect(missing_motor)['_fluidnc_ready'])
+
+        wrong_socket = copy.deepcopy(config)
+        wrong_socket['axes']['Y']['motor1']['stepstick']['step_pin'] = 'I2SO.5'
+        self.assertFalse(inspect(wrong_socket)['_fluidnc_ready'])
+
+        active_z = copy.deepcopy(config)
+        active_z['axes']['Z']['motor0'] = {'stepstick': {'step_pin': 'I2SO.7'}}
+        self.assertFalse(inspect(active_z)['_fluidnc_ready'])
+
+    def test_canonical_commissioning_marker_blocks_motion_until_removed(self):
+        config = self.canonical_dump_config()
+        config['meta'] = 'NEIROSLOPPER_COMMISSIONING 2026-11-03; unverified machine'
+        settings = inspect(config)
+        self.assertFalse(profiles.settings_ready(settings, profiles.DLC32))
+        self.assertTrue(any('Пусковая конфигурация' in reason
+                            for reason in settings['_fluidnc_details']))
+        self.assertIn('направления моторов, масштаб и реле', settings['_fluidnc_reason'])
+
+        config['meta'] = 'Physically commissioned machine'
+        settings = inspect(config)
+        self.assertTrue(profiles.settings_ready(settings, profiles.DLC32),
+                        settings['_fluidnc_details'])
+
+    def test_canonical_required_homing_without_cycles_is_still_rejected(self):
+        config = self.canonical_dump_config()
+        config['start']['must_home'] = True
+        settings = inspect(config)
+        self.assertFalse(settings['_fluidnc_ready'])
+        self.assertTrue(any('Обязательное базирование' in reason
+                            for reason in settings['_fluidnc_details']))
+
+    def test_second_portal_motor_cannot_silently_disappear(self):
+        del self.config['axes']['y']['motor1']
+        self.assertFalse(inspect(self.config)['_fluidnc_ready'])
+
+    def test_duplicate_socket_between_axes_is_rejected(self):
+        self.config['axes']['y']['motor0']['stepstick'] = copy.deepcopy(
+            self.config['axes']['x']['motor0']['stepstick'])
+        self.assertFalse(inspect(self.config)['_fluidnc_ready'])
+
+    def test_switch_roles_cannot_be_swapped_with_motor_socket_names(self):
+        self.config['axes']['x']['motor0']['limit_neg_pin'] = 'gpio.35'
+        self.config['axes']['y']['motor0']['limit_neg_pin'] = 'gpio.36'
+        self.assertFalse(inspect(self.config)['_fluidnc_ready'])
+
+    def test_portal_has_one_switch_not_a_fake_second_copy(self):
+        self.config['axes']['y']['motor1']['limit_neg_pin'] = 'gpio.35'
+        self.assertFalse(inspect(self.config)['_fluidnc_ready'])
+
+    def test_ttl_pin_cannot_also_be_a_laser_output(self):
+        self.config['Laser'] = {'output_pin': 'gpio.32', 'pwm_hz': 5000}
+        self.assertFalse(inspect(self.config)['_fluidnc_ready'])
+
+    def test_new_wiring_does_not_accept_old_scl_relay_assignment(self):
+        self.config['coolant']['flood_pin'] = 'gpio.4'
+        self.assertFalse(inspect(self.config)['_fluidnc_ready'])
+
+    def homing_config(self):
+        config = copy.deepcopy(self.config)
+        config['start']['must_home'] = True
+        for index, axis in enumerate(('x', 'y'), 1):
+            config['axes'][axis]['homing'] = dict(cycle=index, positive_direction=False,
+                feed_mm_per_min=60, seek_mm_per_min=300, mpos_mm=0)
+            config['axes'][axis]['motor0']['pulloff_mm'] = 2
+        config['axes']['y']['motor1']['pulloff_mm'] = 2
+        return config
+
+    def test_explicit_homing_configuration_is_inspected_without_executing_it(self):
+        settings = inspect(self.homing_config())
+        self.assertTrue(settings['_fluidnc_ready'], settings['_fluidnc_details'])
+        self.assertEqual(settings[22], 1)
+
+    def test_required_homing_without_switches_is_not_ready(self):
+        config = self.homing_config()
+        config['axes']['x']['motor0']['limit_neg_pin'] = 'NO_PIN'
+        self.assertFalse(inspect(config)['_fluidnc_ready'])
+
+    def test_homing_direction_must_match_switch_side(self):
+        config = self.homing_config()
+        config['axes']['y']['homing']['positive_direction'] = True
+        self.assertFalse(inspect(config)['_fluidnc_ready'])
+
+    def test_shared_portal_switch_requires_equal_pull_offs(self):
+        config = self.homing_config()
+        config['axes']['y']['motor1']['pulloff_mm'] = 3
+        self.assertFalse(inspect(config)['_fluidnc_ready'])
+
+    def test_required_homing_cannot_be_satisfied_by_only_one_axis(self):
+        config = self.homing_config()
+        del config['axes']['y']['homing']
+        self.assertFalse(inspect(config)['_fluidnc_ready'])
 
 
 class ConfigurationGeneratorTests(unittest.TestCase):

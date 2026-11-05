@@ -14,18 +14,22 @@ from geometry import Sheet, route, validate_paths
 from pen_lift import PenLiftSettings, PEN_MARKER, COOLDOWN_MS, batches, firmware_profile
 from serial_trace import SerialTrace, TransportError
 from machine_profiles import (UNO, DLC32, profile_id, settings_ready, fluidnc_identity,
-                              fluidnc_configuration, fluidnc_pen_profile, pen_matches)
+                              fluidnc_configuration, fluidnc_pen_profile, pen_matches, _pin)
 
 # 100% speed in the UI is this machine profile. GRBL remains the final
 # per-axis limiter; the UI no longer has an unrelated 600 mm/min ceiling.
 MACHINE_MAX_FEED = 3000.0
 MACHINE_ACCELERATION = 150.0
 MAX_JOG_DISTANCE = 100.0
-# A powered lift cannot remain on for a whole long transfer: the independent
-# firmware guard is still the final cutoff. This is the rest-to-rest motion
-# budget, in addition to at most 0.5 s of lift settling and USB/status margin.
+# Bounded lifts reserve time for settling and USB/status traffic. Stock
+# FluidNC has no independent solenoid timer, so enforce the host ON budget
+# while waiting for replies as well as before starting each transfer.
 POWERED_TRAVEL_SECONDS = .55
+# Legacy Uno firmware has its own short ON/OFF guard. FluidNC uses the
+# separately requested ten-second host limit for complete lifted transfers.
 POWERED_HOST_ON_LIMIT = 1.65
+DLC32_MAX_ON_SECONDS = 10.0
+POWERED_JOG_REPLY_MARGIN = .35
 REQUIRED = {
     10: 0, 13: 0, 20: 0, 21: 0, 22: 0,
     110: MACHINE_MAX_FEED, 111: MACHINE_MAX_FEED,
@@ -43,6 +47,7 @@ class GrblSession:
         self.cancelled = cancelled
         self.callback = callback
         self.machine_profile = profile_id(machine_profile)
+        self.simulated_machine_profile = None
         self.work_offset = None
         self.network_interlock = None
         self.write_lock = threading.Lock()
@@ -53,12 +58,14 @@ class GrblSession:
         self.trusted = False
         self.last_status = 0.0
         self.status_number = 0
+        self.last_jog_status_number = 0
         self.active_pins = None  # Fresh Pn state; None is not evidence of released limits.
         self.pen_firmware = None
         self.pen_down = False
         self.power_raises = False
         self.coil_on = False
         self.coil_on_at = None
+        self.coil_deadline = None
         self.pen_off_at = None
         self.last_command = None
         self.powered_travel_notice = False
@@ -92,7 +99,24 @@ class GrblSession:
         with self.write_lock:
             if self.cancelled.is_set():
                 raise Cancelled()
+            self._check_power_budget()
             self._write_bytes(data)
+            self._check_power_budget()
+
+    def fluidnc_power_mode(self):
+        return (self.machine_profile == DLC32 or
+                (isinstance(self.wire, SimWire) and self.simulated_machine_profile == DLC32))
+
+    def host_power_limit(self):
+        return DLC32_MAX_ON_SECONDS if self.fluidnc_power_mode() else POWERED_HOST_ON_LIMIT
+
+    def _check_power_budget(self):
+        # abort()/close() deliberately bypass this check: an expired budget
+        # must never prevent their stop/reset write. This is a host deadline,
+        # not a guaranteed cutoff if the OS or physical transport is stuck.
+        if self.coil_deadline is not None and time.monotonic() >= self.coil_deadline:
+            raise TimeoutError("Истекло время питания соленоида при ожидании контроллера. "
+                               "Операция прервана; проверьте соединение и задайте оба угла заново.")
 
     def abort(self, force=False):
         with self.write_lock:
@@ -105,6 +129,7 @@ class GrblSession:
             # Sending reset is not confirmation that the device received it.
             self.coil_on = None
             self.coil_on_at = None
+            self.coil_deadline = None
             self.pen_down = None
             self.callback("pen", "unknown")
 
@@ -118,6 +143,7 @@ class GrblSession:
                     pass
             self.coil_on = None
             self.coil_on_at = None
+            self.coil_deadline = None
             self.pen_down = None
             if controlled:
                 self.callback("pen", "unknown")
@@ -126,6 +152,7 @@ class GrblSession:
     def read_line(self):
         if self.cancelled.is_set():
             raise Cancelled()
+        self._check_power_budget()
         if self.deferred_lines:
             return self.deferred_lines.popleft()
         return self._read_wire_line()
@@ -133,11 +160,13 @@ class GrblSession:
     def _read_wire_line(self):
         if self.cancelled.is_set():
             raise Cancelled()
+        self._check_power_budget()
         if b"\n" not in self.buffer:
             data = self._wire_call("чтение ответа", self.wire.read, max(1, self._available()))
             if data:
                 self.trace.record("RX", data)
             self.buffer += data
+            self._check_power_budget()
         if len(self.buffer) > 20000:
             raise RuntimeError("Некорректный ответ контроллера.")
         if b"\n" not in self.buffer:
@@ -162,7 +191,10 @@ class GrblSession:
                     self.active_pins += pins
                 if part.startswith(("WPos:", "MPos:", "WCO:")):
                     values = part.split(":", 1)[1].split(",")
-                    point = float(values[0]), float(values[1])
+                    try:
+                        point = float(values[0]), float(values[1])
+                    except (ValueError, IndexError) as exc:
+                        raise RuntimeError("Некорректная позиция контроллера.") from exc
                     if not all(math.isfinite(v) for v in point):
                         raise RuntimeError("Некорректная позиция контроллера.")
                     if part.startswith("WPos:"):
@@ -175,8 +207,11 @@ class GrblSession:
                 self.position = tuple(a - b for a, b in zip(machine_position, self.work_offset))
             self.last_status = time.monotonic()
             self.status_number += 1
+            if self.state == "Jog":
+                self.last_jog_status_number = self.status_number
             self.status_pending = False
             self.callback("position", (self.state, self.position))
+            self.callback("endstops", self.endstop_report())
         elif line.startswith("[MSG:PEN_GUARD:"):
             raise RuntimeError("Сработало ограничение включения соленоида. Реле выключено прошивкой; "
                                "движение прервано. Проверьте нагрев, механику и USB; задайте оба угла заново.")
@@ -184,6 +219,10 @@ class GrblSession:
             self.state = "Alarm"
         elif line.startswith(("error:", "ALARM:")):
             context = f" после команды {self.last_command!r}" if self.last_command else ""
+            if line == "ALARM:3":
+                raise RuntimeError(f"GRBL: {line}{context}. Контроллер сообщил о сбросе во время движения "
+                                   "(Abort Cycle); источник сброса не установлен. Проверьте питание и USB, "
+                                   "восстановите соединение и задайте оба угла заново.")
             raise RuntimeError(f"GRBL: {line}{context}. Проверьте механику и настройки; ноль сброшен.")
         elif self.trusted and (line.startswith(("Grbl", "[FluidNC v", "[MSG:INFO: FluidNC v", "rst:0x", "ets "))):
             raise RuntimeError("Контроллер перезапустился. Нужно заново выставить обе точки.")
@@ -257,6 +296,23 @@ class GrblSession:
                 return self.state, self.position
         raise TimeoutError("Нет ответа о положении. Проверьте соединение и питание.")
 
+    def endstop_report(self):
+        """A fresh Pn report, with configured axes separate from pin state."""
+        config = self.settings.get("_fluidnc_config", {})
+        axes = config.get("axes", {}) if isinstance(config, dict) else {}
+        configured = {}
+        for name in ("x", "y"):
+            axis = axes.get(name, axes.get(name.upper(), {})) if isinstance(axes, dict) else {}
+            configured[name] = any(
+                isinstance(motor, dict) and any(
+                    str(motor.get(pin_key, "NO_PIN")).split(":", 1)[0].strip().lower()
+                    not in ("", "no_pin", "none")
+                    for pin_key in ("limit_neg_pin", "limit_pos_pin", "limit_all_pin"))
+                for key, motor in axis.items()
+                if re.fullmatch(r"motor\d+", str(key))) if isinstance(axis, dict) else False
+        return {"state": self.state, "pins": self.active_pins,
+                "observed_at": self.last_status, "configured": configured}
+
     def initialize(self):
         info = self.command("$I")
         if self.machine_profile == DLC32:
@@ -306,7 +362,8 @@ class GrblSession:
             raise ValueError("Автоматический подъём ручки отключён.")
         coil_on = profile.coil_for(down)
         if coil_on:
-            if (not profile.continuous and not self.coil_on and self.pen_off_at is not None
+            if (not self.fluidnc_power_mode() and not profile.continuous and
+                    not self.coil_on and self.pen_off_at is not None
                     and not isinstance(self.wire, SimWire)):
                 remaining = COOLDOWN_MS / 1000 - (time.monotonic() - self.pen_off_at)
                 if remaining > 0:
@@ -316,6 +373,9 @@ class GrblSession:
             # equivalent to relay ON when electricity raises this mechanism.
             if not self.coil_on:
                 self.coil_on_at = time.monotonic()
+            # Repeated M8/status traffic must not renew one energized period.
+            self.coil_deadline = (None if profile.continuous else
+                                  self.coil_on_at + self.host_power_limit())
             self.coil_on = True
             self.command("M8")
         else:
@@ -325,10 +385,33 @@ class GrblSession:
                 self.pen_off_at = time.monotonic()
             self.coil_on = False
             self.coil_on_at = None
+            self.coil_deadline = None
         self.pen_down = down
         delay = profile.down_ms if down else profile.up_ms
         self.command(f"G4 P{delay / 1000:.3f}")
         self.callback("pen", "down" if down else "up")
+
+    def power_off_pen(self, profile):
+        """Prepare a motors-only jog without pulsing or cooling the relay.
+
+        A logical M9 is safe only with the same confirmed physical polarity
+        required by other relay actions. Disabling automatic pen control does
+        not authorize touching an unverified output.
+        """
+        self.check_pen(profile)
+        if not profile.enabled:
+            if self.coil_on is not False:
+                raise ValueError("Сначала подтвердите выключение соленоида перед ручным перемещением.")
+            return
+        was_on = self.coil_on
+        self.command("M9")
+        if was_on or self.pen_off_at is None:
+            self.pen_off_at = time.monotonic()
+        self.coil_on = False
+        self.coil_on_at = None
+        self.coil_deadline = None
+        self.pen_down = profile.power_raises
+        self.callback("pen", "off")
 
     def refresh_settings(self):
         self.settings = {}
@@ -353,6 +436,56 @@ class GrblSession:
         if state != "Idle" or position is None:
             raise ValueError(f"Контроллер не готов: {state}. Для движения нужен Idle и координаты WPos.")
         return position
+
+    def ready_pen(self, profile):
+        """Check isolated relay control without requiring XY commissioning.
+
+        The relay still needs a trusted session, a fresh Idle report and a
+        confirmed matching output. An incomplete XY configuration cannot make
+        a conflicted or unassigned coolant pin usable.
+        """
+        self.check_network_interlock()
+        if not self.trusted:
+            raise ValueError("Сначала подтвердите подключение к контроллеру.")
+        state, _ = self.status()
+        if state != "Idle":
+            raise ValueError(f"Контроллер не готов: {state}. Для управления реле нужен Idle.")
+        self.check_pen(profile)
+        if not profile.enabled:
+            raise ValueError("Включите проверенный режим соленоида.")
+        if self.machine_profile != DLC32:
+            return
+
+        config = self.settings.get("_fluidnc_config", {})
+        coolant = config.get("coolant", {}) if isinstance(config, dict) else {}
+        if not isinstance(coolant, dict):
+            raise ValueError("Не подтверждён фактический выход coolant для реле.")
+        pin, flags = _pin(coolant.get("flood_pin"))
+        expected_pin, _ = _pin(self.pen_firmware.get("flood_pin"))
+        if (pin != expected_pin or set(flags) - {"high", "low"} or
+                ("low" in flags) != self.pen_firmware["active_low"] or
+                (not settings_ready(self.settings, DLC32) and pin != "gpio.32")):
+            raise ValueError("Не подтверждён отдельный выход LASER TTL/GPIO32 для реле.")
+        if _pin(coolant.get("mist_pin"))[0] != "no_pin":
+            raise ValueError("Для отдельной проверки реле дополнительный выход mist должен быть NO_PIN.")
+
+        def claimed_elsewhere(node, path=()):
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    child = path + (str(key),)
+                    if child == ("coolant", "flood_pin"):
+                        continue
+                    if str(key).endswith("_pin") and _pin(value)[0] == pin:
+                        return True
+                    if claimed_elsewhere(value, child):
+                        return True
+            elif isinstance(node, list):
+                return any(claimed_elsewhere(value, path + (str(i),))
+                           for i, value in enumerate(node))
+            return False
+
+        if claimed_elsewhere(config):
+            raise ValueError("GPIO реле также занят другим узлом; управление запрещено.")
 
     def check_network_interlock(self):
         # Stock FluidNC has no JD-DGUS lease service. A fresh response checks
@@ -468,14 +601,33 @@ class GrblSession:
                 raise Cancelled()
         raise TimeoutError("Не получено подтверждение Idle после движения.")
 
-    def wait_jog(self, timeout=30):
+    def wait_jog(self, expected_position, timeout=30):
         # Normal G-code is forbidden while Jog is active: do not send G4 here.
+        # FluidNC acknowledges the queued jog before cycleStart changes Idle
+        # to Jog. A fresh Idle report alone is therefore not completion.
+        tolerances = []
+        for key in (100, 101):
+            steps = float(self.settings.get(key, 0))
+            if not math.isfinite(steps) or steps <= 0:
+                raise ValueError("Не подтверждён масштаб осей для проверки ручного движения.")
+            # Account for step rounding and the 0.001 mm status precision.
+            tolerances.append(min(.02, .5 / steps + .001))
+        started = self.state == "Jog"
+        before_wait = self.status_number
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             state, position = self.status()
+            started = started or self.last_jog_status_number > before_wait
             if state == "Idle" and position is not None:
-                return position
-            if state != "Jog":
+                if (math.dist(position, expected_position) <= .02 and
+                        all(abs(actual - expected) <= tolerance
+                            for actual, expected, tolerance in zip(position, expected_position, tolerances))):
+                    return position
+                if started:
+                    raise RuntimeError("Ручное движение остановилось до заданной точки; задайте оба угла заново.")
+            elif state == "Jog":
+                started = True
+            else:
                 raise RuntimeError(f"Ручное движение прервано: {state}.")
             if self.cancelled.wait(0.1):
                 raise Cancelled()
@@ -709,7 +861,7 @@ class Controller:
         if action == "disconnect":
             self.disconnect()
             return
-        profile = self.pen_settings if action in ("configure","hold","clear","unlock") else PenLiftSettings.from_value(params.get("pen", self.pen_settings))
+        profile = self.pen_settings if action in ("configure","hold","clear","unlock","check_endstops") else PenLiftSettings.from_value(params.get("pen", self.pen_settings))
         if action == "connect":
             self.disconnect()
             if self.cancelled.is_set():
@@ -737,6 +889,7 @@ class Controller:
                     import serial
                     wire = serial.Serial(port, 115200, timeout=0.05, write_timeout=0.5)
             self.session = GrblSession(wire, self.cancelled, self.emit, self.machine_profile)
+            self.session.simulated_machine_profile = selected if self.simulation else None
             self.session.network_interlock = self.network_interlock
             if port != "DEMO" and not port.lower().startswith("tcp:"):
                 if self.cancelled.wait(2.5):
@@ -762,6 +915,12 @@ class Controller:
             # Firmware identity remains the connection-time report. Silently
             # rewriting it hid mismatches in both DEMO and regression tests.
             s.wire.pen_down = s.wire.coil_on != self.pen.power_raises
+        if action == "check_endstops":
+            if self.machine_profile != DLC32 or self.simulation:
+                raise ValueError("Проверка входов этой кнопкой доступна для подключённой MKS DLC32.")
+            s.status()
+            self.emit("log", "Концевики прочитаны свежим запросом; движения и переключения реле не выполнялись.")
+            return
         if action == "unlock":
             if self.machine_profile != DLC32 or self.simulation:
                 raise ValueError("Снятие аварии доступно только для подключённой MKS DLC32.")
@@ -797,8 +956,8 @@ class Controller:
             if not self.zero or not self.sheet:
                 raise ValueError("Сначала сохраните оба угла листа.")
             validate_paths(params.get("paths"), self.sheet)
-        position = s.ready()
-        s.check_pen(self.pen, require_confirmed=action not in ("pen_up","pen_pulse"))
+        if action in ("pen_up_hold", "pen_down_hold", "pen_up", "pen_pulse"):
+            s.ready_pen(self.pen)
         if action in ("pen_up_hold", "pen_down_hold"):
             if not self.pen.enabled:
                 raise ValueError("Включите проверенный режим соленоида.")
@@ -840,6 +999,8 @@ class Controller:
                     raise
             self.emit("finished", action)
             return
+        position = s.ready()
+        s.check_pen(self.pen)
         axes = params["axes"]
         if self.zero and axes != self.axes:
             raise ValueError("Направления осей изменились. Сначала сбросьте обе точки.")
@@ -862,6 +1023,9 @@ class Controller:
         if not math.isfinite(feed) or feed <= 0 or max_feed <= 0 or feed > max_feed + 0.001:
             raise ValueError("Некорректная скорость: она должна быть положительной и не выше максимума GRBL.")
         if action == "jog":
+            lift_pen = params.get("lift_pen", True)
+            if type(lift_pen) is not bool:
+                raise ValueError("Режим подъёма при ручном перемещении должен быть включён или выключен.")
             delta = params["delta"]
             distance = math.hypot(*delta)
             if not all(math.isfinite(v) for v in delta) or not 0.01 <= distance <= MAX_JOG_DISTANCE + 0.001:
@@ -870,13 +1034,16 @@ class Controller:
             target = axes.paper((position[0] + dx, position[1] + dy))
             if self.sheet and not self.sheet.contains(target):
                 raise ValueError("Этот шаг выходит за границы заданного листа.")
-            if self.pen.enabled and self.pen.power_raises:
+            if not lift_pen:
+                s.power_off_pen(self.pen)
+            elif self.pen.enabled and self.pen.power_raises:
                 self.powered_travel(axes.paper(position), target, axes, feed, jog=True)
                 return
-            if self.pen.enabled:
+            elif self.pen.enabled:
                 s.set_pen(False, self.pen)
             s.command(f"$J=G91 G21 X{dx:.3f} Y{dy:.3f} F{feed:.1f}")
-            s.wait_jog(timeout=max(30, distance / feed * 120 + 15))
+            s.wait_jog((position[0] + dx, position[1] + dy),
+                       timeout=max(30, distance / feed * 120 + 15))
             return
         if action == "scan":
             if not self.zero or not self.sheet:
@@ -940,18 +1107,38 @@ class Controller:
         raise ValueError("Неизвестная операция.")
 
     def powered_travel(self, current, target, axes, feed, *, jog=False):
-        """Lift throughout one transfer in the explicitly continuous profile.
+        """Lift through a transfer; an arrow jog is always one planner move.
 
-        Legacy guarded profiles retain their bounded rest-to-rest transfers.
-        Both modes confirm full axis stop before lowering the pen, and reset
-        the controller on cancellation or transport failure.
+        FluidNC uses one whole transfer with its requested ON limit. The Uno
+        retains short drawing batches for its independent firmware guard.
+        All paths confirm full stop before lowering and stop on link failure.
         """
         s = self.session
         distance = math.dist(current, target)
         if distance <= .0005:
             s.set_pen(True, self.pen)
             return tuple(current)
-        if self.pen.continuous:
+        if self.pen.continuous or jog or s.fluidnc_power_mode():
+            if not self.pen.continuous:
+                acceleration = min(float(s.settings.get(120, 0)), float(s.settings.get(121, 0)))
+                velocity = feed / 60
+                if not math.isfinite(acceleration) or acceleration <= 0:
+                    raise ValueError("Для поднятого перемещения нужно подтверждённое ускорение обеих осей.")
+                # One click is one jog, never a loop of short relay cycles.
+                # Reject before M8 when a whole rest-to-rest move cannot fit
+                # the existing bounded ON period. Reserve coordinate rounding
+                # and reply/stop margin; the runtime deadline remains active.
+                padded_distance = distance + .004
+                if padded_distance <= velocity * velocity / acceleration:
+                    motion_seconds = 2 * math.sqrt(padded_distance / acceleration)
+                else:
+                    motion_seconds = padded_distance / velocity + velocity / acceleration
+                required = self.pen.up_ms / 1000 + motion_seconds + POWERED_JOG_REPLY_MARGIN
+                limit = s.host_power_limit()
+                if required > limit:
+                    raise ValueError(f"Перемещение требует слишком долгого питания соленоида "
+                                     f"(лимит {limit:g} с). Уменьшите расстояние или поднимите "
+                                     "ручку вручную для перемещения без автоподъёма. Ход не начинался.")
             timeout = max(30, distance / feed * 120 + 15)
             try:
                 s.set_pen(False, self.pen)
@@ -963,10 +1150,10 @@ class Controller:
                     command = f"$J=G91 G21 X{x-cx:.3f} Y{y-cy:.3f} F{feed:.1f}"
                 else:
                     command = f"G1 X{x:.3f} Y{y:.3f} F{feed:.1f}"
-                # Exactly one planner movement, including 50/100 mm jogs.
-                # No intermediate relay cycles or cooling pauses.
+                # Exactly one planner movement; bounded long jogs have already
+                # been rejected, explicitly continuous ones retain full travel.
                 s.command(command, timeout=timeout)
-                actual = s.wait_jog(timeout=timeout) if jog else s.synchronize(timeout)
+                actual = s.wait_jog((x, y), timeout=timeout) if jog else s.synchronize(timeout)
                 actual = axes.paper(actual)
                 if math.dist(actual, target) > .02:
                     raise RuntimeError("Контроллер не подтвердил точку поднятого перехода; задайте оба угла заново.")
@@ -1005,7 +1192,7 @@ class Controller:
                 # Do not start a move if host delays already consumed the ON
                 # budget. Reset also stops motors; never continue pen-down.
                 if (s.coil_on_at is None or not s.coil_on or s.pen_down or
-                        time.monotonic() - s.coil_on_at + duration > POWERED_HOST_ON_LIMIT):
+                        time.monotonic() - s.coil_on_at + duration > s.host_power_limit()):
                     raise TimeoutError("Подъём задержался: переход отменён до движения. Проверьте соединение и соленоид.")
                 x, y = axes.machine(endpoint)
                 if jog:
@@ -1014,7 +1201,7 @@ class Controller:
                 else:
                     command = f"G1 X{x:.3f} Y{y:.3f} F{feed:.1f}"
                 s.command(command, timeout=8)
-                actual = s.wait_jog(timeout=8) if jog else s.synchronize(8)
+                actual = s.wait_jog((x, y), timeout=8) if jog else s.synchronize(8)
                 # Confirm full stop before OFF: relay-off synchronization can
                 # otherwise lower the nib while an axis planner is still busy.
                 s.set_pen(True, self.pen)
