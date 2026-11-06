@@ -1,0 +1,28 @@
+{
+  "upstream_tag": "v4.1.1",
+  "custom_version": "v4.1.1-JD-DGUS1",
+  "platformio": "6.2.0",
+  "platform": "espressif32@6.12.0",
+  "framework": "framework-arduinoespressif32@3.20017.241212+sha.dcc1105b",
+  "toolchain": "toolchain-xtensa-esp32@8.4.0+2021r2-patch5",
+  "libraries": {
+    "TMCStepper": "0.7.3",
+    "JsonStreamingParser": "https://github.com/MitchBradley/json-streaming-parser#ddb90a2e4f798a62a2624f2ed21e8c2c64ae60e0",
+    "ESP8266 and ESP32 OLED driver for SSD1306 displays": "4.4.1",
+    "AsyncTCP": "3.5.0",
+    "ESPAsyncWebServer": "https://github.com/ESP32Async/ESPAsyncWebServer.git#4d4eaca1833c3c11940a988fc8a6c0bdf734bbd2"
+  },
+  "remarks": "The binary was compiled against these exact downloaded dependency revisions. The official inherited project file permits newer versions on a fresh install; freeze to this lock for reproduction. No Git inspection of the user's repository is performed by git-version-jd.py.",
+  "candidate": "v4.1.1-JD-DGUS1-BT1",
+  "source_zip_sha256": "64821a97923bd064a2d7f9008f3d4fe025632494a8512dd8f3bea94bb6ee8497",
+  "original_source_zip_sha256": "22be0c58a313ab207c6477897b54906df338cc13880b08515fed7b927394ca42",
+  "dgus_module_sha256": "15a4168069fbd81bd66ffab46ed0ee94e8e8ed926833282fc8bb9db264c2560e",
+  "hardware_tested": false,
+  "changes": [
+    "wifi environment plus BTConfig and BluetoothSerial",
+    "explicit combined variant and version suffix",
+    "exact dependency revisions",
+    "candidate 8MB image and 3MB app slots with unchanged FS offset and size",
+    "no motion/DWIN implementation changes"
+  ]
+}

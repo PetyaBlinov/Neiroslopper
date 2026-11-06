@@ -38,6 +38,7 @@ secrets/
 /dist/
 /releases/
 *.zip
+!/firmware/jd_wifibt/source.zip
 *.7z
 *.tar
 *.gz
@@ -55,3 +56,7 @@ Desktop.ini
 /docs/artifacts/
 /docs/build_*_pdf.py
 /docs/images/wiring-*.png
+
+# Isolated firmware compilation and artifacts stay local.
+/firmware/jd_wifibt/build/
+/firmware/jd_wifibt/output/
