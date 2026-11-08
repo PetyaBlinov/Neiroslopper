@@ -15,6 +15,7 @@ import webbrowser
 from PIL import Image, ImageTk
 
 from geometry import Sheet
+from ui_theme import GOLD, MUTED
 from .image_trace import Options, Asset, asset_from_bytes, read_asset, decode_rgb, trace
 from .layout import ScrollablePage
 from .reference_images import search, download, save_source, ReferenceCancelled
@@ -239,7 +240,7 @@ class ReferencePanel:
         self.original_canvas.bind('<B1-Motion>', self.move_crop)
         self.original_canvas.bind('<ButtonRelease-1>', self.end_crop)
         ttk.Label(preview, text='Оранжевые переходы тоже рисуются без подъёма ручки. Начальный подвод проверяйте в пульте.',
-                  wraplength=550, foreground='#984b00').grid(row=2, column=0, columnspan=2, sticky='ew', pady=5)
+                  wraplength=550, foreground=GOLD).grid(row=2, column=0, columnspan=2, sticky='ew', pady=5)
         self.version_input = ttk.Combobox(preview, textvariable=self.version_choice,
                                          values=('Первый вариант',), state='readonly')
         self.version_input.grid(row=3, column=0, columnspan=2, sticky='ew')
@@ -395,10 +396,10 @@ class ReferencePanel:
                            command=lambda item=candidate, bitmap=image: self.use_thumbnail(item, bitmap)).pack(fill='x', pady=3)
             ttk.Label(card, text=candidate.title, wraplength=210).pack(anchor='w', pady=4)
             ttk.Label(card, text=('SVG · ' if candidate.mime == 'image/svg+xml' else '') + candidate.license,
-                      wraplength=210, foreground='#52647a').pack(anchor='w')
+                      wraplength=210, foreground=MUTED).pack(anchor='w')
             if image is None:
                 ttk.Label(card, text='Превью не загрузилось. Проверьте образец на странице источника.',
-                          wraplength=210, foreground='#984b00').pack(anchor='w', pady=3)
+                          wraplength=210, foreground=GOLD).pack(anchor='w', pady=3)
             ttk.Button(card, text='Страница источника',
                        command=lambda item=candidate: webbrowser.open(item.page)).pack(fill='x', pady=3)
         self.gallery.enable_wheel()

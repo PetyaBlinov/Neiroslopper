@@ -7,6 +7,7 @@ from copy import deepcopy
 import math
 from pathlib import Path
 from machine_profiles import AXIS_PARAMETER_LIMITS
+from ui_theme import GOLD
 
 LAYOUT_NOTICE = ('I2S семейства MKS DLC32: BCK16, WS17, DATA21. В новой схеме '
                  'каретка X подключена к Y1 (5/6), портал Y — к X (1/2) и Z (3/4). '
@@ -291,7 +292,7 @@ def show_setup(parent, data_dir=None):
     ttk.Label(body, text=WIRING_LABEL, wraplength=900, font=('Segoe UI', 11, 'bold')).pack(anchor='w', pady=(4, 6))
     ttk.Label(body, text='X в программе — каретка ручки; Y — весь портал. Физические надписи X/Y/Z на плате не переименовываются.',
               wraplength=900).pack(anchor='w', pady=(0, 6))
-    ttk.Label(body, text=LAYOUT_NOTICE, wraplength=850, foreground='#6a4c12').pack(anchor='w', pady=(0, 10))
+    ttk.Label(body, text=LAYOUT_NOTICE, wraplength=850, foreground=GOLD).pack(anchor='w', pady=(0, 10))
     variables = {}
     name = tk.StringVar(value=defaults['name'])
     name_row = ttk.Frame(body)

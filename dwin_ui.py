@@ -7,6 +7,7 @@ from tkinter import ttk, messagebox
 from dwin_bridge import (SerialBridge, CommandRouter, snapshot, link_state, write_words,
                          STATUS_VP, STEP_VP, SPEED_VP, RESULT_VP, LINK_VP, STEPS)
 from network_transport import parse_tcp_endpoint
+from ui_theme import INK
 
 
 def display_endpoint(main):
@@ -77,7 +78,7 @@ class DwinWindow:
         self.poll_button.pack(anchor="w")
         ttk.Label(body, text="Опрос работает без изменения системной конфигурации дисплея. Снимайте галочку только при проверенной автоотправке DGUS. Переключение — после отключения.",
                   wraplength=610).pack(anchor="w", pady=4)
-        ttk.Label(body, textvariable=self.info, wraplength=610, foreground="#225ea8").pack(anchor="w", pady=10)
+        ttk.Label(body, textvariable=self.info, wraplength=610, foreground=INK).pack(anchor="w", pady=10)
         ttk.Separator(body).pack(fill="x", pady=8)
         ttk.Label(body, text=("• Первый раз проверьте экран в DEMO. Соединение само не разрешает движение.\n"
                              "• Один клик стрелки — один шаг; удержание не запускает непрерывный ход.\n"

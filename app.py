@@ -132,6 +132,9 @@ class App:
         self.status = tk.StringVar(value="Не подключено · выберите USB, Wi-Fi или Демо")
         self.coordinates = tk.StringVar(value="Положение: —")
         self.paper_text = tk.StringVar(value="Размер появится после сохранения двух углов")
+        self.paper_summary = tk.StringVar(value="Углы не заданы")
+        self.workflow_status = tk.StringVar(value="Подключите плату")
+        self.pen_state_text = tk.StringVar(value="Плата не подключена")
         self.hint = tk.StringVar(value="Эскиз A4 готов к редактированию. Для рисования подключите плату и задайте два угла листа.")
         self.root.title(APP_TITLE)
         apply_app_icon(self.root)
@@ -173,264 +176,20 @@ class App:
                 "ноль станка не задан, рисование недоступно")
 
     def build(self):
-        outer = ttk.Frame(self.root, padding=(20, 16), style="App.TFrame")
-        outer.pack(fill="both", expand=True)
-        header = ttk.Frame(outer, style="App.TFrame")
-        header.pack(fill="x", pady=(0, 12))
-        brand = ttk.Frame(header, style="App.TFrame")
-        brand.pack(side="left")
-        ttk.Label(brand, text=APP_NAME, style="Title.TLabel").pack(anchor="w")
-        ttk.Label(brand, text="FluidNC · Рисунок на экране → траектория на бумаге", style="Subtitle.TLabel").pack(anchor="w", pady=(2, 0))
-        self.stop_button = tk.Button(header, text="СТОП  /  ESC", command=self.stop,
-                                     bg="#af2936", activebackground="#94212d", fg="white", activeforeground="white",
-                                     relief="flat", borderwidth=0, cursor="hand2", font=("Segoe UI", 12, "bold"),
-                                     padx=25, pady=12)
-        self.stop_button.pack(side="right", anchor="center")
+        from desktop_layout import build_workspace
+        build_workspace(self)
 
-        connection = ttk.Frame(outer, padding=(14, 12), style="Card.TFrame")
-        connection.pack(fill="x")
-        row = ttk.Frame(connection)
-        row.pack(fill="x")
-        ttk.Label(row, text="1  Подключение", style="Section.TLabel").pack(side="left", padx=(0, 15))
-        self.connection_mode_buttons = []
-        for mode in ("USB", "Wi-Fi", "Демо"):
-            button = ttk.Radiobutton(row, text=mode, value=mode, variable=self.connection_mode,
-                                     command=self.change_connection_mode)
-            button.pack(side="left", padx=(0, 12))
-            self.connection_mode_buttons.append(button)
-        self.profile_input = ttk.Combobox(row, textvariable=self.machine_profile,
-                                        values=tuple(PROFILE_LABELS.values()), state="readonly", width=27)
-        self.profile_input.pack(side="left", padx=(6, 8))
-        self.profile_input.bind("<<ComboboxSelected>>", self.change_machine_profile)
-        self.board_setup_button = ttk.Button(row, text="Настроить плату…", command=self.open_board_setup)
-        self.board_setup_button.pack(side="right", padx=(8, 0))
-        target_row = ttk.Frame(connection)
-        target_row.pack(fill="x", pady=(9, 0))
-        self.connect_button = ttk.Button(target_row, text="Подключить", command=self.connect, style="Accent.TButton")
-        self.connect_button.pack(side="right", padx=(10, 0))
-        self.target_area = ttk.Frame(target_row)
-        self.target_area.pack(side="left", fill="x", expand=True)
-        self.usb_connection_frame = ttk.Frame(self.target_area)
-        ttk.Label(self.usb_connection_frame, text="USB-порт").pack(side="left", padx=(0, 8))
-        self.ports = ttk.Combobox(self.usb_connection_frame, textvariable=self.usb_port, width=24, state="readonly")
-        self.ports.pack(side="left", padx=(0, 6))
-        self.ports.bind("<<ComboboxSelected>>", self.select_connection_target)
-        self.refresh_button = ttk.Button(self.usb_connection_frame, text="Обновить", command=self.refresh_ports)
-        self.refresh_button.pack(side="left")
-        self.wifi_connection_frame = ttk.Frame(self.target_area)
-        ttk.Label(self.wifi_connection_frame, text="Плата").pack(side="left", padx=(0, 8))
-        self.wifi_boards = ttk.Combobox(self.wifi_connection_frame, textvariable=self.wifi_target, width=38, state="readonly")
-        self.wifi_boards.pack(side="left", padx=(0, 6))
-        self.wifi_boards.bind("<<ComboboxSelected>>", self.select_connection_target)
-        self.wifi_search_button = ttk.Button(self.wifi_connection_frame, text="Найти плату", command=self.find_wifi_boards)
-        self.wifi_search_button.pack(side="left")
-        self.demo_connection_frame = ttk.Frame(self.target_area)
-        ttk.Label(self.demo_connection_frame, text="Проверка интерфейса без оборудования").pack(side="left")
-        self.demo_connection_frame.pack(fill="x")
-        self.status_label = ttk.Label(connection, textvariable=self.status, foreground="#17633f")
-        self.status_label.pack(anchor="w", pady=(9, 2))
-        self.connection_help_label = ttk.Label(connection, textvariable=self.connection_help,
-                                                style="Muted.TLabel", wraplength=900)
-        self.connection_help_label.pack(anchor="w")
-        self.wifi_status_label = ttk.Label(connection, textvariable=self.wifi_status,
-                                           style="Muted.TLabel", wraplength=900)
-        ttk.Label(outer, text="2  Задайте лист     →     3  Подготовьте рисунок     →     4  Запустите рисование",
-                  style="Steps.TLabel").pack(anchor="w", pady=(13, 10))
+    def open_help(self):
+        from desktop_layout import show_help
+        show_help(self)
 
-        columns = ttk.Frame(outer, style="App.TFrame")
-        columns.pack(fill="both", expand=True)
-        sidebar = ttk.Frame(columns, width=350)
-        sidebar.pack(side="left", fill="y", padx=(0, 14))
-        sidebar.pack_propagate(False)
-        tabs = ttk.Notebook(sidebar)
-        tabs.pack(fill="both", expand=True)
-        controls_tab, settings_tab = ttk.Frame(tabs), ttk.Frame(tabs)
-        tabs.add(controls_tab, text="Управление")
-        tabs.add(settings_tab, text="Настройки")
-        self.sidebar_tabs = tabs
-        scroll_targets = []
-
-        def scroll_panel(parent):
-            scrollbar = ttk.Scrollbar(parent, orient="vertical")
-            scrollbar.pack(side="right", fill="y")
-            canvas = tk.Canvas(parent, bg="white", highlightthickness=0, yscrollcommand=scrollbar.set)
-            canvas.pack(side="left", fill="both", expand=True)
-            scrollbar.configure(command=canvas.yview)
-            frame = ttk.Frame(canvas, padding=(10, 12))
-            window = canvas.create_window(0, 0, window=frame, anchor="nw", width=320)
-            frame.bind("<Configure>", lambda event: canvas.configure(scrollregion=canvas.bbox("all")))
-            canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window, width=event.width))
-            scroll_targets.append((parent, canvas))
-            return frame, canvas
-
-        control_left, self.sidebar_canvas = scroll_panel(controls_tab)
-        settings_left, _ = scroll_panel(settings_tab)
-
-        def scroll_sidebar(event):
-            widget = event.widget
-            while widget is not None:
-                for parent, canvas in scroll_targets:
-                    if widget is parent:
-                        canvas.yview_scroll(int(-event.delta / 120), "units")
-                        return "break"
-                widget = getattr(widget, "master", None)
-        self.root.bind("<MouseWheel>", scroll_sidebar)
-        right = ttk.Frame(columns, padding=(14, 12), style="Card.TFrame")
-        right.pack(side="left", fill="both", expand=True)
-
-        jog = ttk.LabelFrame(control_left, text="Подвести ручку", padding=10)
-        jog.pack(fill="x", pady=(0, 10))
-        row = ttk.Frame(jog)
-        row.pack(fill="x")
-        ttk.Label(row, text="Шаг, мм").pack(side="left")
-        self.step_input = ttk.Combobox(row, textvariable=self.step,
-                                      values=("0.1", "1", "5", "10", "20", "50", "100"), width=7, state="normal")
-        self.step_input.pack(side="left", padx=(6, 13))
-        ttk.Label(row, text="Скорость, %").pack(side="left")
-        self.feed_input = ttk.Entry(row, textvariable=self.feed, width=5)
-        self.feed_input.pack(side="right")
-        cross = ttk.Frame(jog)
-        cross.pack(pady=(8, 2))
-        self.jog_buttons = []
-        for label, dx, dy, r, c in (("↑", 0, -1, 0, 1), ("←", -1, 0, 1, 0),
-                                    ("→", 1, 0, 1, 2), ("↓", 0, 1, 2, 1)):
-            button = ttk.Button(cross, text=label, width=4, style="Jog.TButton", command=lambda x=dx, y=dy: self.jog(x, y))
-            button.grid(row=r, column=c, padx=3, pady=2)
-            self.jog_buttons.append(button)
-        ttk.Label(jog, textvariable=self.coordinates, wraplength=285).pack(anchor="w", pady=(6, 2))
-        self.jog_lift_button = ttk.Checkbutton(jog, text="Поднимать ручку при\nперемещении стрелками",
-                                               variable=self.jog_lift, command=self.update_controls)
-        self.jog_lift_button.pack(anchor="w", pady=(5, 3))
-        ttk.Label(jog, textvariable=self.jog_lift_hint,
-                  style="Muted.TLabel", wraplength=280).pack(anchor="w")
-
-        corners = ttk.LabelFrame(control_left, text="2  Лист по двум углам", padding=10)
-        corners.pack(fill="x", pady=(0, 10))
-        self.first_button = ttk.Button(corners, text="Здесь верхний левый угол", command=self.set_zero)
-        self.first_button.pack(fill="x", pady=(0, 5))
-        self.second_button = ttk.Button(corners, text="Здесь нижний правый угол", command=self.set_corner)
-        self.second_button.pack(fill="x")
-        ttk.Label(corners, textvariable=self.paper_text, wraplength=280).pack(anchor="w", pady=8)
-        self.clear_button = ttk.Button(corners, text="Новый лист / сбросить углы", command=lambda: self.submit("clear"))
-        self.clear_button.pack(fill="x")
-        ttk.Label(control_left, text="Углы задаются на реальной бумаге. Редактор сверху можно открыть и без подключения к плате.",
-                  style="Muted.TLabel", wraplength=280).pack(anchor="w", pady=(0, 5))
-
-        setup = ttk.LabelFrame(settings_left, text="Плата и направления", padding=10)
-        setup.pack(fill="x", pady=(0, 10))
-        self.configure_button = ttk.Button(setup, text="Проверить конфигурацию FluidNC", command=self.configure)
-        self.configure_button.pack(fill="x")
-        ttk.Label(setup, textvariable=self.wiring_text, wraplength=280,
-                  style="Muted.TLabel").pack(anchor="w", pady=(5, 0))
-        self.check_endstops_button = ttk.Button(setup, text="Проверить концевики", command=self.check_endstops)
-        self.check_endstops_button.pack(fill="x", pady=(5, 0))
-        ttk.Label(setup, textvariable=self.endstop_text, wraplength=280).pack(anchor="w", pady=(5, 0))
-        self.unlock_button = ttk.Button(setup, text="Снять аварию MKS…", command=self.unlock_alarm)
-        self.unlock_button.pack(fill="x", pady=(5, 0))
-        self.hold_button = ttk.Checkbutton(setup, text="Удерживать моторы в простое", variable=self.hold, command=self.change_hold)
-        self.hold_button.pack(anchor="w", pady=(6, 3))
-        self.axis_widgets = []
-        for text, variable in (("Поменять оси X ↔ Y", self.swap),
-                               ("Развернуть направление вправо", self.reverse_right),
-                               ("Развернуть направление вниз", self.reverse_down)):
-            widget = ttk.Checkbutton(setup, text=text, variable=variable, command=self.redraw)
-            widget.pack(anchor="w", pady=1)
-            self.axis_widgets.append(widget)
-        ttk.Label(setup, text="У FluidNC удержание задаётся в YAML. Направления проверьте до сохранения первого угла.",
-                  style="Muted.TLabel", wraplength=280).pack(anchor="w", pady=(5, 0))
-
-        pen_box = ttk.LabelFrame(settings_left, text="Ручка / соленоид", padding=10)
-        pen_box.pack(fill="x", pady=(0, 10))
-        self.pen_widgets = []
-        enabled = ttk.Checkbutton(pen_box, text="Автоматический подъём ручки", variable=self.pen_enabled, command=self.apply_pen_settings)
-        enabled.pack(anchor="w")
-        ttk.Label(pen_box, textvariable=self.pen_summary, wraplength=280, style="Muted.TLabel").pack(anchor="w", pady=(4, 6))
-        row = ttk.Frame(pen_box)
-        row.pack(fill="x")
-        self.pen_up_button = ttk.Button(row, text="Проверить подъём", command=lambda: self.submit("pen_up"))
-        self.pen_up_button.pack(side="left", fill="x", expand=True)
-        self.pen_settings_button = ttk.Button(row, text="Настройки…", command=self.toggle_pen_settings)
-        self.pen_settings_button.pack(side="left", padx=(4, 0))
-        ttk.Label(pen_box, textvariable=self.pen_status, wraplength=280, style="Muted.TLabel").pack(anchor="w", pady=(6, 0))
-        self.pen_advanced = ttk.Frame(pen_box)
-        row = ttk.Frame(self.pen_advanced)
-        row.pack(fill="x", pady=(8, 4))
-        ttk.Label(row, text="Активный уровень").pack(side="left")
-        self.pen_polarity = ttk.Combobox(row, textvariable=self.pen_active, values=("Не проверено", "HIGH", "LOW"), state="readonly", width=13)
-        self.pen_polarity.pack(side="right")
-        self.pen_polarity.bind("<<ComboboxSelected>>", self.pen_polarity_changed)
-        row = ttk.Frame(self.pen_advanced)
-        row.pack(fill="x", pady=2)
-        ttk.Label(row, text="Питание ручку").pack(side="left")
-        self.pen_effect_combo = ttk.Combobox(row, textvariable=self.pen_effect, values=("Поднимает", "Опускает"), state="readonly", width=13)
-        self.pen_effect_combo.pack(side="right")
-        self.pen_effect_combo.bind("<<ComboboxSelected>>", self.pen_effect_changed)
-        verified = ttk.Checkbutton(self.pen_advanced, text="Полярность и действие проверены", variable=self.pen_confirmed, command=self.apply_pen_settings)
-        verified.pack(anchor="w")
-        continuous = ttk.Checkbutton(self.pen_advanced, text="Без ограничения времени катушки", variable=self.pen_continuous, command=self.apply_pen_settings)
-        continuous.pack(anchor="w")
-        for caption, variable in (("Подъём, мс", self.pen_up_ms), ("Опускание, мс", self.pen_down_ms)):
-            row = ttk.Frame(self.pen_advanced)
-            row.pack(fill="x", pady=2)
-            ttk.Label(row, text=caption + " (50–500)").pack(side="left")
-            field = ttk.Entry(row, textvariable=variable, width=8)
-            field.pack(side="right")
-            self.pen_widgets.append(field)
-        save = ttk.Button(self.pen_advanced, text="Сохранить настройки", command=self.apply_pen_settings)
-        save.pack(fill="x", pady=4)
-        help_button = ttk.Button(self.pen_advanced, text="Определить HIGH / LOW…", command=self.open_pen_observer)
-        help_button.pack(fill="x", pady=3)
-        self.pen_pulse_button = ttk.Button(self.pen_advanced, text="Короткий тест ручки", command=self.pen_pulse)
-        self.pen_pulse_button.pack(fill="x", pady=3)
-        self.pen_widgets.extend((enabled, verified, continuous, save, help_button, self.pen_settings_button))
-        ttk.Label(self.pen_advanced, text="Тест не двигает оси. Нагрев не измеряется; штатная FluidNC не добавляет аппаратный таймер соленоида.",
-                  style="Muted.TLabel", wraplength=280).pack(anchor="w", pady=(5, 0))
-        extra = ttk.LabelFrame(settings_left, text="Дополнительно", padding=10)
-        extra.pack(fill="x")
-        self.camera_button = ttk.Button(extra, text="Камера / сканер", command=self.open_camera)
-        self.camera_button.pack(fill="x", pady=(0, 5))
-        ttk.Button(extra, text="Дисплей DWIN…", command=self.open_dwin).pack(fill="x")
-        ttk.Label(extra, text="Отдельный дисплей не нужен для USB или Wi-Fi FluidNC. Сетевой JD-мост требует специальной прошивки.",
-                  style="Muted.TLabel", wraplength=280).pack(anchor="w", pady=(6, 0))
-
-        toolbar = ttk.Frame(right)
-        toolbar.pack(fill="x", pady=(0, 8))
-        ttk.Label(toolbar, text="3  Рисунок", style="Section.TLabel").pack(side="left", padx=(0, 12))
-        self.editor_button = ttk.Button(toolbar, text="Редактор", command=self.open_editor)
-        self.editor_button.pack(side="left", padx=(0, 5))
-        self.load_button = ttk.Button(toolbar, text="Открыть SVG", command=self.open_svg)
-        self.load_button.pack(side="left")
-        self.test_button = ttk.Button(toolbar, text="Тест 10 мм", command=self.load_test)
-        self.test_button.pack(side="left", padx=5)
-        ttk.Label(toolbar, text="Поле, мм:").pack(side="right", padx=(5, 3))
-        self.margin_input = ttk.Entry(toolbar, textvariable=self.margin, width=5)
-        self.margin_input.pack(side="right")
-        self.file_label = ttk.Label(right, text=self.file_name, style="Muted.TLabel", wraplength=650)
-        self.file_label.pack(anchor="w", pady=(0, 8))
-        drawing = ttk.Frame(right)
-        drawing.pack(fill="both", expand=True)
-        self.canvas = tk.Canvas(drawing, width=1, height=1, bg="#e8eee9", highlightthickness=1, highlightbackground="#dce5de")
-        self.canvas.pack(fill="both", expand=True)
-        self.canvas.bind("<Configure>", lambda event: self.request_redraw())
-        ttk.Label(right, textvariable=self.pen_legend, wraplength=650,
-                  foreground="#86521b", font=("Segoe UI", 9)).pack(anchor="w", pady=(7, 2))
-        actions = ttk.Frame(right)
-        actions.pack(fill="x", pady=(8, 0))
-        self.startpoint_button = ttk.Button(actions, text="К началу рисунка", command=self.go_start)
-        self.startpoint_button.pack(side="left", padx=(0, 8))
-        self.draw_button = ttk.Button(actions, text="4  Начать рисование", command=self.draw, style="Accent.TButton")
-        self.draw_button.pack(side="left")
-        self.progress = ttk.Progressbar(right, maximum=100)
-        self.progress.pack(fill="x", pady=(10, 8))
-        ttk.Label(right, textvariable=self.hint, wraplength=650, foreground="#17633f").pack(anchor="w")
-
-        footer = ttk.Frame(outer, style="App.TFrame")
-        footer.pack(fill="x", pady=(10, 0))
-        ttk.Label(footer, text="СТОП отправляет программный сброс. При потере связи отключайте силовое питание вручную.",
-                  style="Subtitle.TLabel").pack(anchor="w")
-        self.log = tk.Text(footer, height=2, font=("Consolas", 9), state="disabled", bg="#172b20",
-                           fg="#e1ece4", insertbackground="white", relief="flat", padx=9, pady=6)
-        self.log.pack(fill="x", pady=(6, 0))
+    def toggle_diagnostics(self):
+        if self.diagnostics_frame.winfo_manager():
+            self.diagnostics_frame.pack_forget()
+            self.diagnostics_button.configure(text="Журнал ▴")
+        else:
+            self.diagnostics_frame.pack(fill="x", pady=(8, 0))
+            self.diagnostics_button.configure(text="Скрыть журнал ▾")
 
     def open_board_setup(self):
         from fluidnc_setup import show_setup
@@ -890,7 +649,7 @@ class App:
     def toggle_pen_settings(self):
         if self.pen_advanced.winfo_manager():
             self.pen_advanced.pack_forget()
-            self.pen_settings_button.configure(text="Настройки…")
+            self.pen_settings_button.configure(text="Параметры реле…")
         else:
             self.pen_advanced.pack(fill="x")
             self.pen_settings_button.configure(text="Свернуть")
@@ -1139,6 +898,24 @@ class App:
         ready = available and self.machine_ready()
         motion_ready = ready and self.pen_ready()
         drawing_ready = motion_ready and self.zero and self.sheet is not None
+        self.paper_summary.set(f"{self.sheet.width:.1f} × {self.sheet.height:.1f} мм" if self.sheet else
+                               "Верхний левый угол сохранён" if self.zero else "Углы не заданы")
+        self.workflow_status.set(
+            "Загрузка SVG…" if self.svg_loading else "Выполняется…" if busy else
+            "Подключите плату" if not self.connected else
+            "Остановлено · подключитесь заново" if self.controller.cancelled.is_set() else
+            "Проверьте настройки платы" if not ready else
+            "Проверьте настройки реле" if not self.pen_ready() else
+            "Задайте верхний левый угол" if not self.zero else
+            "Задайте нижний правый угол" if self.sheet is None else
+            "Выберите рисунок" if not self.paths else "Готово к рисованию")
+        self.pen_state_text.set(
+            "Состояние реле неизвестно" if self.relay_state_unknown else
+            "Автоподъём выключен" if not self.pen_enabled.get() else
+            "Демо: виртуальная ручка" if self.connected and self.simulation else
+            "Плата не подключена" if not self.connected else
+            "Нужна проверка реле" if not self.pen_ready() else
+            "Выполняется…" if busy else "Реле готово к тесту")
         if not self.pen_enabled.get():
             self.jog_lift.set(False)
         self.jog_lift_button.configure(state="normal" if not busy and self.pen_enabled.get() else "disabled")
@@ -1222,7 +999,7 @@ class App:
         self.ports.configure(state="readonly" if not connection_locked and self.connection_mode.get() == "USB" else "disabled")
         self.wifi_boards.configure(state="readonly" if not connection_locked and not searching and self.connection_mode.get() == "Wi-Fi" else "disabled")
         self.profile_input.configure(state="readonly" if not connection_locked else "disabled")
-        self.configure_button.configure(text="Проверить конфигурацию FluidNC" if self.effective_machine_profile() == DLC32
+        self.configure_button.configure(text="Проверить настройки платы" if self.effective_machine_profile() == DLC32
                                         else "Настроить без концевиков")
         self.step_input.configure(state="normal" if not busy else "disabled")
 
@@ -1247,12 +1024,9 @@ class App:
         canvas.delete("all")
         if not sheet:
             title = "Верхний левый угол сохранён" if self.zero else "Задайте два угла листа"
-            text = "Подведите головку вправо и вниз,\nзатем сохраните нижний правый угол." if self.zero else \
-                "① Верхний левый — начало координат\n② Нижний правый — ширина и высота\n\nЛист положите параллельно осям станка."
-            canvas.create_text(w / 2, h / 2 - 50, text=title, font=("Segoe UI", 17, "bold"), fill="#22392b")
-            canvas.create_text(w / 2, h / 2 + 10, text=text, font=("Segoe UI", 12), fill="#52647b", justify="center")
+            canvas.create_text(w / 2, h / 2, text=title, font=("Segoe UI", 15, "bold"), fill="#a3b7ce")
             return
-        scale = min((w - 90) / sheet.width, (h - 80) / sheet.height)
+        scale = min((w - 48) / sheet.width, (h - 36) / sheet.height)
         if scale <= 0:
             return
         left, top = (w - scale * sheet.width) / 2, (h - scale * sheet.height) / 2
@@ -1266,8 +1040,6 @@ class App:
             canvas.create_line(*xy((u, 0)), *xy((u, sheet.height)), fill="#edf1f5")
         for v in range(grid, int(sheet.height), grid):
             canvas.create_line(*xy((0, v)), *xy((sheet.width, v)), fill="#edf1f5")
-        canvas.create_text(left, top - 16, text=("① 0,0 · верхний левый" if self.zero and self.sheet else "Эскиз сохранён · перед рисованием задайте два угла"), anchor="w", fill="#344b65")
-        canvas.create_text(x2, y2 + 17, text=f"② {sheet.width:.1f} × {sheet.height:.1f} мм", anchor="e", fill="#344b65")
         previous = None
         for path in self.paths:
             if not path:
@@ -1279,11 +1051,11 @@ class App:
             for offset in range(0, len(path) - 1, 512):
                 points = path[offset:offset + 513]
                 coordinates = [value for point in points for value in xy(point)]
-                canvas.create_line(*coordinates, fill="#17633f", width=2, tags="contour")
+                canvas.create_line(*coordinates, fill="#123a62", width=2, tags="contour")
             previous = path[-1]
         if self.paths:
             sx, sy = xy(self.paths[0][0])
-            canvas.create_oval(sx - 4, sy - 4, sx + 4, sy + 4, fill="#218657", outline="")
+            canvas.create_oval(sx - 4, sy - 4, sx + 4, sy + 4, fill="#123a62", outline="")
         canvas.create_line(0, 0, 0, 0, fill="#df790d", width=2, dash=(5, 3), tags="start_link")
         canvas.create_line(0, 0, 0, 0, fill="#ba2439", width=2, tags="head_horizontal")
         canvas.create_line(0, 0, 0, 0, fill="#ba2439", width=2, tags="head_vertical")
