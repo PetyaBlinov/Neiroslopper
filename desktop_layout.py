@@ -21,10 +21,7 @@ def build_workspace(app):
     header = ttk.Frame(outer, style="App.TFrame")
     header.pack(fill="x")
     ttk.Label(header, text=APP_NAME, style="Title.TLabel").pack(side="left")
-    a.stop_button = tk.Button(header, text="СТОП · Esc", command=a.stop,
-                             bg="#a63748", activebackground="#c24758", fg="white", activeforeground="white",
-                             relief="flat", borderwidth=0, cursor="hand2", font=("Segoe UI", 11, "bold"),
-                             padx=22, pady=9)
+    a.stop_button = ttk.Button(header, text="СТОП · Esc", command=a.stop, style="Danger.TButton")
     a.stop_button.pack(side="right")
     ttk.Button(header, text="Справка", command=a.open_help, style="Header.TButton").pack(side="right", padx=16)
     CircuitDivider(outer).pack(fill="x", pady=(7, 9))
@@ -34,10 +31,10 @@ def build_workspace(app):
     row = ttk.Frame(connection)
     row.pack(fill="x")
     a.connection_mode_buttons = []
-    for mode in ("USB", "Wi-Fi", "Демо"):
+    for mode in ("USB", "Wi-Fi", "Bluetooth", "Демо"):
         button = ttk.Radiobutton(row, text=mode, value=mode, variable=a.connection_mode,
-                                 command=a.change_connection_mode)
-        button.pack(side="left", padx=(0, 14))
+                                 command=a.change_connection_mode, style="Mode.TRadiobutton")
+        button.pack(side="left", padx=(0, 4))
         a.connection_mode_buttons.append(button)
     a.connect_button = ttk.Button(row, text="Подключить", command=a.connect, style="Accent.TButton")
     a.connect_button.pack(side="right", padx=(12, 0))
@@ -55,10 +52,17 @@ def build_workspace(app):
     a.wifi_boards.bind("<<ComboboxSelected>>", a.select_connection_target)
     a.wifi_search_button = ttk.Button(a.wifi_connection_frame, text="Найти плату", command=a.find_wifi_boards)
     a.wifi_search_button.pack(side="left")
+    a.bluetooth_connection_frame = ttk.Frame(a.target_area)
+    a.bluetooth_ports = ttk.Combobox(a.bluetooth_connection_frame, textvariable=a.bluetooth_port, width=24, state="readonly")
+    a.bluetooth_ports.pack(side="left", fill="x", expand=True, padx=(0, 8))
+    a.bluetooth_ports.bind("<<ComboboxSelected>>", a.select_connection_target)
+    a.refresh_bluetooth_button = ttk.Button(a.bluetooth_connection_frame, text="Обновить", command=a.refresh_bluetooth_ports)
+    a.refresh_bluetooth_button.pack(side="left")
     a.demo_connection_frame = ttk.Frame(a.target_area)
     ttk.Label(a.demo_connection_frame, text="Без оборудования", style="Muted.TLabel").pack(side="left")
     a.demo_connection_frame.pack(fill="x")
     a.wifi_status_label = ttk.Label(connection, textvariable=a.wifi_status, style="Muted.TLabel", wraplength=900)
+    a.bluetooth_status_label = ttk.Label(connection, textvariable=a.bluetooth_status, style="Muted.TLabel", wraplength=900)
 
     # Footer is packed before the expanding workspace, keeping STOP/start visible
     # even when the optional journal is open at the minimum window height.
@@ -259,6 +263,7 @@ def build_workspace(app):
 
 
 def show_help(a):
+    from display_scaling import ui_scale, scale_widget_tree
     existing = getattr(a, "help_window", None)
     if existing is not None and existing.winfo_exists():
         existing.lift()
@@ -266,13 +271,15 @@ def show_help(a):
     window = a.help_window = tk.Toplevel(a.root)
     window.title("Neiroslopper · Справка")
     window.configure(bg=BACKGROUND)
-    width, height = 700, 590
+    scale = ui_scale(a.root)
+    width, height = round(700 * scale), round(590 * scale)
     x = max(0, min(a.root.winfo_screenwidth() - width,
                    a.root.winfo_rootx() + (a.root.winfo_width() - width) // 2))
     y = max(0, min(a.root.winfo_screenheight() - height - 60,
                    a.root.winfo_rooty() + (a.root.winfo_height() - height) // 2))
     window.geometry(f"{width}x{height}+{x}+{y}")
-    window.minsize(620, 480)
+    window.minsize(round(620 * scale), round(480 * scale))
+    window._neiroslopper_geometry_scaled = True
     window.bind("<Escape>", lambda event: a.stop())
     apply_app_icon(window)
     ttk.Button(window, text="Закрыть", command=window.destroy).pack(side="bottom", anchor="e", padx=16, pady=(0, 14))
@@ -294,7 +301,7 @@ def show_help(a):
         def resize(event):
             canvas.itemconfigure(item, width=event.width)
             for label in content.winfo_children():
-                label.configure(wraplength=max(200, event.width - 32))
+                label.configure(wraplength=max(round(200 * scale), event.width - round(32 * scale)))
         canvas.bind("<Configure>", resize)
         help_canvases[str(panel)] = canvas
         return content
@@ -302,7 +309,7 @@ def show_help(a):
     guide, details = page("Как пользоваться"), page("Текущее состояние")
     window.bind("<MouseWheel>", lambda event: help_canvases[tabs.select()].yview_scroll(int(-event.delta / 120), "units"))
     for title, text in (
-        ("Подключение", "Выберите USB, Wi-Fi или Демо. Для Wi-Fi сначала подключите ноутбук к сети FluidNC или общему роутеру, нажмите «Найти плату» и затем «Подключить»."),
+        ("Подключение", "Выберите USB, Wi-Fi, Bluetooth или Демо. Для Wi-Fi сначала подключите ноутбук к сети FluidNC или общему роутеру и нажмите «Найти плату». Для Bluetooth выполните сопряжение в Windows и выберите исходящий COM-порт. На плате нужна BT-прошивка; её установка пока не проверена."),
         ("Тестирование слева", "Стрелка выполняет один ход с заданными шагом и скоростью. Без флажка подъёма поднимите или выньте ручку вручную. Тест ручки выполняет подъём и возврат без движения осей."),
         ("Область на бумаге справа", "Подведите ручку к верхнему левому углу бумаги и сохраните его. Затем подведите к нижнему правому и сохраните второй угол. Эскиз A4 в окне не заменяет реальные углы."),
         ("Рисунок и запуск", "Создайте рисунок в редакторе, откройте SVG или выберите квадрат 10 мм. «Подвести к началу» только перемещает головку. «Начать рисование» запускает работу после отдельного подтверждения."),
@@ -310,6 +317,7 @@ def show_help(a):
     ):
         ttk.Label(guide, text=title, style="Section.TLabel").pack(anchor="w", pady=(0, 5))
         ttk.Label(guide, text=text, wraplength=600, justify="left").pack(anchor="w", pady=(0, 14))
-    for variable in (a.connection_help, a.wifi_status, a.wiring_text, a.jog_lift_hint,
+    for variable in (a.connection_help, a.bluetooth_status if a.connection_mode.get() == "Bluetooth" else a.wifi_status, a.wiring_text, a.jog_lift_hint,
                      a.pen_summary, a.pen_status, a.pen_legend, a.hint):
         ttk.Label(details, textvariable=variable, wraplength=600, justify="left").pack(anchor="w", pady=(0, 12))
+    scale_widget_tree(window)

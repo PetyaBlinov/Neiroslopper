@@ -25,10 +25,14 @@ class ManualJogUiTests(unittest.TestCase):
         self.app.controller.busy = False
         close_tk_app(self)
 
-    def test_default_is_motors_only_with_manual_nib_instruction(self):
-        self.assertFalse(self.app.jog_lift.get())
+    def test_default_lifts_pen_without_starting_any_motion(self):
+        self.assertTrue(self.app.jog_lift.get())
+        self.assertIn("на весь ход", self.app.jog_lift_hint.get())
+        self.assertEqual(self.app.controller.jobs.qsize(), 0)
+        self.assertFalse(self.app.connected)
+        self.app.jog_lift.set(False)
+        self.app.update_controls()
         self.assertIn("только моторы", self.app.jog_lift_hint.get())
-        self.assertIn("поднимите или выньте ручку вручную", self.app.jog_lift_hint.get())
 
     def test_fluidnc_lift_displays_ten_second_limit_without_enabling_continuous_mode(self):
         self.app.machine_profile.set(PROFILE_LABELS[DLC32])
@@ -144,6 +148,7 @@ class ManualJogUiTests(unittest.TestCase):
         self.assertTrue(all(str(button["state"]) == "normal" for button in self.app.jog_buttons))
 
     def test_checkbox_does_not_change_relay_profile_or_paper_calibration(self):
+        self.app.jog_lift.set(False)
         self.app.connected, self.app.zero = True, True
         before_pen = self.app.read_pen_settings()
         with patch.object(self.app, "machine_ready", return_value=True), \

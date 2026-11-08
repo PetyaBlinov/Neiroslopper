@@ -9,6 +9,8 @@ os.chdir(ROOT)
 
 
 def main():
+    from display_scaling import configure_process_dpi
+    configure_process_dpi()
     import tkinter as tk
     from tkinter import messagebox
     try:

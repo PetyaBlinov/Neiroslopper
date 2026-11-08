@@ -64,6 +64,15 @@ class WorkspaceLayoutTests(unittest.TestCase):
                              for text in texts))
         self.assertFalse(str(self.app.draw_button.cget("text")).lstrip().startswith("4"))
 
+    def test_polling_unchanged_state_does_not_relayout_rounded_controls(self):
+        self.app.update_controls()
+        with patch.object(self.app.draw_button, "configure", wraps=self.app.draw_button.configure) as draw, \
+                patch.object(self.app.jog_buttons[0], "configure", wraps=self.app.jog_buttons[0].configure) as jog:
+            for _ in range(5):
+                self.app.update_controls()
+        draw.assert_not_called()
+        jog.assert_not_called()
+
     def test_opening_diagnostics_only_changes_visibility(self):
         self.assertEqual(self.app.diagnostics_frame.winfo_manager(), "")
         self.app.zero = True
@@ -102,7 +111,7 @@ class WorkspaceLayoutTests(unittest.TestCase):
     def test_key_actions_fit_minimum_window_with_optional_journal(self):
         self.root.geometry("1100x700")
         self.root.deiconify()
-        for mode in ("Демо", "USB", "Wi-Fi"):
+        for mode in ("Демо", "USB", "Wi-Fi", "Bluetooth"):
             self.app.connection_mode.set(mode)
             self.app.change_connection_mode()
             for journal in (False, True):
