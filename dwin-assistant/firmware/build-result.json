@@ -1,0 +1,15 @@
+{
+  "version": "v4.1.1-JD-DGUS2.1",
+  "board": "MKS DLC32 V2.2",
+  "flash_used": 1837801,
+  "flash_available": 1966080,
+  "hardware_tested": false,
+  "firmware-v4.1.1-JD-DGUS2.1.bin": {
+    "sha256": "6adeacc1b158465fc569666117d5c6ab376417fe37e86746a4f795d7d090e272",
+    "bytes": 1844400
+  },
+  "FluidNC-JD-DGUS2.1-source.zip": {
+    "sha256": "18e93607cfd5ab111057c58c8d17e7847077772302ea36706e5b0c9730bf5fe1",
+    "bytes": 3008663
+  }
+}
