@@ -1,0 +1,4 @@
+/PROGRAM/.venv/
+/PROGRAM/data/
+/PROGRAM/assistant/voice_models/
+/PROGRAM/assistant/review_queue/
