@@ -90,9 +90,6 @@ class App:
         self.connection_mode = tk.StringVar(value="Демо")
         self.active_connection_mode = "Демо"
         self.usb_port = tk.StringVar(value="")
-        self.bluetooth_port = tk.StringVar(value="")
-        self.bluetooth_targets = {}
-        self.bluetooth_status = tk.StringVar(value="Сначала выполните сопряжение платы с Windows.")
         self.wifi_target = tk.StringVar(value="")
         self.connection_help = tk.StringVar(value="Демо работает без платы и не отправляет команды оборудованию.")
         self.wifi_status = tk.StringVar(value="Нажмите «Найти плату», когда ноутбук подключён к нужной сети.")
@@ -135,7 +132,7 @@ class App:
         # physical motor directions still need to be checked on the machine.
         self.reverse_right = tk.BooleanVar(value=True)
         self.reverse_down = tk.BooleanVar()
-        self.status = tk.StringVar(value="Не подключено · выберите USB, Wi-Fi, Bluetooth или Демо")
+        self.status = tk.StringVar(value="Не подключено · выберите USB, Wi-Fi или Демо")
         self.coordinates = tk.StringVar(value="Положение: —")
         self.paper_text = tk.StringVar(value="Размер появится после сохранения двух углов")
         self.paper_summary = tk.StringVar(value="Углы не заданы")
@@ -379,34 +376,15 @@ class App:
         if self.connected or self.controller.busy:
             return
         from serial.tools import list_ports
-        choices = [port.device for port in list_ports.comports()
-                   if re.fullmatch(r"COM[1-9]\d*", port.device, re.I)]
+        from serial_ports import usb_port_choices
+        try:
+            choices = usb_port_choices(list_ports.comports())
+        except OSError:
+            choices = []
+            self.status.set("Не удалось прочитать USB-порты. Повторите обновление.")
         self.ports["values"] = choices
         if self.usb_port.get() not in choices:
             self.usb_port.set(choices[0] if choices else "")
-        self.select_connection_target()
-
-    def refresh_bluetooth_ports(self):
-        if self.closed or self.connected or self.controller.busy or self.svg_loading:
-            return
-        from serial.tools import list_ports
-        from bluetooth_ports import bluetooth_choices
-        try:
-            choices = bluetooth_choices(list_ports.comports())
-        except OSError:
-            choices = []
-            self.bluetooth_status.set("Не удалось прочитать Bluetooth-порты Windows. Повторите обновление.")
-        else:
-            detected = sum(choice.detected for choice in choices)
-            self.bluetooth_status.set(
-                "Выберите исходящий Bluetooth-порт платы." if detected else
-                "Bluetooth не распознан. Выберите известный исходящий COM-порт." if choices else
-                "Нет Bluetooth-портов. Выполните сопряжение в Windows и обновите список.")
-        self.bluetooth_targets = {choice.label: choice.device for choice in choices}
-        self.bluetooth_ports["values"] = tuple(self.bluetooth_targets)
-        if self.bluetooth_port.get() not in self.bluetooth_targets:
-            # An unknown COM must never silently stand in for a Bluetooth board.
-            self.bluetooth_port.set(choices[0].label if len(choices) == 1 and choices[0].detected else "")
         self.select_connection_target()
 
     def wifi_worker_active(self):
@@ -426,21 +404,20 @@ class App:
 
     def change_connection_mode(self):
         if self.connected or self.controller.busy or self.svg_loading:
-            self.connection_mode.set(self.active_connection_mode)
+            self.connection_mode.set(self.active_connection_mode if self.active_connection_mode in ("USB", "Wi-Fi", "Демо") else "Демо")
             return
         mode = self.connection_mode.get()
-        if mode not in ("USB", "Wi-Fi", "Bluetooth", "Демо"):
-            self.connection_mode.set(self.active_connection_mode)
-            return
+        if mode not in ("USB", "Wi-Fi", "Демо"):
+            mode = self.active_connection_mode if self.active_connection_mode in ("USB", "Wi-Fi", "Демо") else "Демо"
+            self.connection_mode.set(mode)
         self.cancel_wifi_search(clear_results=True)
         self.active_connection_mode = mode
-        if mode in ("Wi-Fi", "Bluetooth") and app_profile(self) != DLC32:
+        if mode == "Wi-Fi" and app_profile(self) != DLC32:
             self.machine_profile.set(PROFILE_LABELS[DLC32])
             self.change_machine_profile()
-        for frame in (self.usb_connection_frame, self.wifi_connection_frame, self.bluetooth_connection_frame, self.demo_connection_frame):
+        for frame in (self.usb_connection_frame, self.wifi_connection_frame, self.demo_connection_frame):
             frame.pack_forget()
         self.wifi_status_label.pack_forget()
-        self.bluetooth_status_label.pack_forget()
         if mode == "USB":
             self.usb_connection_frame.pack(fill="x")
             self.connection_help.set("Подключите плату USB-кабелем, выберите её COM-порт и нажмите «Подключить».")
@@ -450,13 +427,6 @@ class App:
             self.connection_help.set("Сначала подключите ноутбук к сети FluidNC или общему роутеру, затем нажмите «Найти плату».")
             self.wifi_status.set("Поиск проверяет платы в вашей сети. Подключение выполняется отдельной кнопкой." if MDNS_AVAILABLE else
                                  "Доступны точка доступа FluidNC, поиск по имени и сохранённые платы; расширенный поиск в сети роутера ограничен.")
-        elif mode == "Bluetooth":
-            self.bluetooth_connection_frame.pack(fill="x")
-            self.bluetooth_status_label.pack(anchor="w", pady=(2, 0))
-            self.connection_help.set("Bluetooth Classic SPP: сначала выполните сопряжение с Windows, затем выберите исходящий COM-порт. "
-                                     "На плате нужна прошивка с включённым Bluetooth. "
-                                     "Для текущего DWIN-моста дополнительно сохраняется связь по Wi-Fi.")
-            self.refresh_bluetooth_ports()
         else:
             self.demo_connection_frame.pack(fill="x")
             self.connection_help.set("Демо работает без платы и не отправляет команды оборудованию.")
@@ -468,7 +438,8 @@ class App:
             return "DEMO"
         if mode == "USB":
             port = self.usb_port.get()
-            if not re.fullmatch(r"COM[1-9]\d*", port, re.I):
+            if (not re.fullmatch(r"COM[1-9]\d*", port, re.I) or
+                    port.upper() not in tuple(self.ports["values"])):
                 raise ValueError("USB-порт не найден. Подключите плату и нажмите «Обновить».")
             return port.upper()
         if mode == "Wi-Fi":
@@ -478,14 +449,7 @@ class App:
             if app_profile(self) != DLC32:
                 raise ValueError("Wi-Fi работает с профилем MKS DLC32 / FluidNC.")
             return endpoint
-        if mode == "Bluetooth":
-            port = self.bluetooth_targets.get(self.bluetooth_port.get())
-            if port is None or not re.fullmatch(r"COM[1-9]\d*", port, re.I):
-                raise ValueError("Выберите исходящий Bluetooth COM-порт платы после сопряжения с Windows.")
-            if app_profile(self) != DLC32:
-                raise ValueError("Bluetooth работает с профилем MKS DLC32 / FluidNC.")
-            return port.upper()
-        raise ValueError("Выберите USB, Wi-Fi, Bluetooth или Демо.")
+        raise ValueError("Выберите USB, Wi-Fi или Демо.")
 
     def select_connection_target(self, event=None):
         if not self.connected and not self.controller.busy:
@@ -617,7 +581,7 @@ class App:
         if self.connected or self.controller.busy:
             return
         selected = app_profile(self)
-        if selected == UNO and self.connection_mode.get() in ("Wi-Fi", "Bluetooth"):
+        if selected == UNO and self.connection_mode.get() == "Wi-Fi":
             self.connection_mode.set("USB")
             self.change_connection_mode()
         if selected != self.axis_profile:
@@ -644,7 +608,7 @@ class App:
             messagebox.showerror("Сохранение профиля", str(exc), parent=self.root)
         self.pen_firmware = None
         self.settings = {}
-        self.hint.set("Выберите USB, Wi-Fi, Bluetooth или Демо в блоке подключения. Для Bluetooth сначала выполните сопряжение с Windows." if selected == DLC32 else
+        self.hint.set("Выберите USB, Wi-Fi или Демо в блоке подключения." if selected == DLC32 else
                       "Для Uno выберите USB и его COM-порт. Демо работает без оборудования.")
         self.update_controls()
 
@@ -1060,7 +1024,6 @@ class App:
         for widget, enabled in (
                 (self.connect_button, not busy and (self.connected or (has_target and not searching))),
                 (self.refresh_button, not connection_locked and self.connection_mode.get() == "USB"),
-                (self.refresh_bluetooth_button, not connection_locked and self.connection_mode.get() == "Bluetooth"),
                 (self.wifi_search_button, not connection_locked and not searching and self.connection_mode.get() == "Wi-Fi"),
                 (self.configure_button, available), (self.board_setup_button, not busy),
                 (self.check_endstops_button, available and self.effective_machine_profile() == DLC32 and not self.simulation),
@@ -1088,7 +1051,6 @@ class App:
         for button in self.connection_mode_buttons:
             _configure(button, state="disabled" if connection_locked else "normal")
         _configure(self.ports, state="readonly" if not connection_locked and self.connection_mode.get() == "USB" else "disabled")
-        _configure(self.bluetooth_ports, state="readonly" if not connection_locked and self.connection_mode.get() == "Bluetooth" else "disabled")
         _configure(self.wifi_boards, state="readonly" if not connection_locked and not searching and self.connection_mode.get() == "Wi-Fi" else "disabled")
         _configure(self.profile_input, state="readonly" if not connection_locked else "disabled")
         _configure(self.configure_button, text="Проверить настройки платы" if self.effective_machine_profile() == DLC32
@@ -1309,8 +1271,7 @@ class App:
                 else:
                     text = str(value)
                 if "ClearCommError" in text or "PermissionError(13" in text:
-                    kind = "Bluetooth-порту" if self.connection_mode.get() == "Bluetooth" else "USB-порту"
-                    text = (f"Windows прервала доступ к {kind}. Рисунок сохранён; перед новым запуском восстановите связь и задайте оба угла.\n\n"
+                    text = ("Windows прервала доступ к USB-порту. Рисунок сохранён; перед новым запуском восстановите связь и задайте оба угла.\n\n"
                             "Технические подробности: " + text)
                 self.note("ОШИБКА: " + text)
                 # A preceding disconnect event already invalidated the session.

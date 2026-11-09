@@ -151,6 +151,23 @@ class AssistantBackendTests(unittest.TestCase):
         self.assertIn("загруженных настройках", speed.text)
         self.assertNotIn("3000", speed.text)
 
+    def test_removed_transport_is_not_offered_even_with_cloud_enabled(self):
+        for prompt in ("Как подключиться по Bluetooth?", "Как поставить BT-прошивку?"):
+            with self.subTest(prompt=prompt):
+                reply = self.engine.answer(prompt, editor_state(), use_llm=True)
+                self.assertIn("удалено", reply.text)
+                self.assertIn("USB, Wi-Fi и Демо", reply.text)
+                self.assertIsNone(reply.plan)
+        self.generate.assert_not_called()
+
+    def test_shared_wifi_answer_does_not_invent_camera_provisioning(self):
+        reply = self.answer("Как соединить плату и камеру в одной Wi-Fi сети?")
+        self.assertIn("отдельно управляет MKS", reply.text)
+        self.assertIn("прошивка самой камеры не найдена", reply.text)
+        self.assertIn("не подтверждается", reply.text)
+        self.assertIsNone(reply.plan)
+        self.generate.assert_not_called()
+
     def test_cloud_snapshot_does_not_invent_verified_board_or_display_settings(self):
         from assistant.chat_context import chat_snapshot
         state = chat_snapshot(editor_state())

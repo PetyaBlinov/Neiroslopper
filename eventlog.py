@@ -36,8 +36,8 @@ REASONS = frozenset((
 ))
 STRING_FIELDS = {
     "action": ACTIONS,
-    "mode": frozenset(("USB", "Wi-Fi", "Bluetooth", "Демо", "DEMO")),
-    "transport": frozenset(("usb", "wifi", "bluetooth", "demo", "serial", "tcp", "none")),
+    "mode": frozenset(("USB", "Wi-Fi", "Демо", "DEMO")),
+    "transport": frozenset(("usb", "wifi", "demo", "serial", "tcp", "none")),
     "state": STATES,
     "kind": STATES | frozenset(("text", "move", "resize", "scale", "rotate", "mirror",
                                 "compose", "creative", "help", "status", "refused", "error")),

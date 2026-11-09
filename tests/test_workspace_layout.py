@@ -111,7 +111,7 @@ class WorkspaceLayoutTests(unittest.TestCase):
     def test_key_actions_fit_minimum_window_with_optional_journal(self):
         self.root.geometry("1100x700")
         self.root.deiconify()
-        for mode in ("Демо", "USB", "Wi-Fi", "Bluetooth"):
+        for mode in ("Демо", "USB", "Wi-Fi"):
             self.app.connection_mode.set(mode)
             self.app.change_connection_mode()
             for journal in (False, True):

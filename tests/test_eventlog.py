@@ -24,7 +24,7 @@ class EventLogTests(unittest.TestCase):
 
             def write():
                 for i in range(40):
-                    log.record("action_submitted", action="jog", count=i, mode="Bluetooth",
+                    log.record("action_submitted", action="jog", count=i, mode="Wi-Fi",
                                prompt="draw my private text", gcode="G0 X999", port="COM5",
                                endpoint="tcp://192.168.1.7:23", password="secret", reason="secret",
                                caller="192.168.1.7", error_type="private-failure-message")
@@ -36,7 +36,7 @@ class EventLogTests(unittest.TestCase):
                 thread.join()
             saved = rows(log)
             self.assertEqual(len(saved), 160)
-            self.assertTrue(all(row["action"] == "jog" and row["mode"] == "Bluetooth" for row in saved))
+            self.assertTrue(all(row["action"] == "jog" and row["mode"] == "Wi-Fi" for row in saved))
             self.assertTrue(all("utc" in row and "monotonic_s" in row for row in saved))
             text = log.path.read_text(encoding="ascii")
             for private in ("private", "G0 X999", "COM5", "192.168", "secret", "password", "endpoint"):
