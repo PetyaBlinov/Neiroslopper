@@ -21,6 +21,26 @@ from machine_profiles import (UNO, DLC32, profile_id, settings_ready, fluidnc_id
 MACHINE_MAX_FEED = 3000.0
 MACHINE_ACCELERATION = 150.0
 MAX_JOG_DISTANCE = 100.0
+
+
+def board_runtime_info(lines):
+    """Optional JD diagnostics; never proof of configuration or motion readiness."""
+    markers = [line for line in lines if isinstance(line, str) and line.startswith("[JD-DGUS:")]
+    if len(markers) != 1 or not markers[0].endswith("]"):
+        return {}
+    result = {}
+    fields = markers[0][len("[JD-DGUS:"):-1].split(",")
+    for token, key, maximum, digits in (
+            ("UPTIME_MS", "firmware_uptime_ms", 0xFFFFFFFF, 10),
+            ("RESET_REASON", "firmware_reset_reason", 255, 3)):
+        values = [field[len(token) + 1:] for field in fields if field.startswith(token + "=")]
+        if (len(values) != 1 or not re.fullmatch(r"[0-9]{1," + str(digits) + r"}", values[0]) or
+                int(values[0]) > maximum):
+            return {}
+        result[key] = int(values[0])
+    return result
+
+
 # Bounded lifts reserve time for settling and USB/status traffic. Stock
 # FluidNC has no independent solenoid timer, so enforce the host ON budget
 # while waiting for replies as well as before starting each transfer.
@@ -318,6 +338,9 @@ class GrblSession:
         if self.machine_profile == DLC32:
             if not fluidnc_identity(info):
                 raise RuntimeError("Выбран MKS DLC32 / FluidNC, но плата не подтвердила FluidNC. Проверьте профиль и COM-порт.")
+            runtime = board_runtime_info(info)
+            if runtime:
+                self.callback("board_runtime", runtime)
             # A valid FluidNC banner alone cannot prove the relay polarity,
             # dual-X wiring or axis setup. Read the actual controller YAML.
             self.refresh_settings()
@@ -416,7 +439,27 @@ class GrblSession:
     def refresh_settings(self):
         self.settings = {}
         if self.machine_profile == DLC32:
-            self.settings = fluidnc_configuration(self.command("$Config/Dump", timeout=12))
+            source = "usb"
+            if str(getattr(self.wire, "port", "")).lower().startswith("tcp:"):
+                from network_config import (read_runtime_config, RuntimeConfigUnavailable,
+                                            RuntimeConfigCancelled)
+                try:
+                    config_lines = read_runtime_config(self.wire, self.cancelled)
+                    source = "http"
+                except RuntimeConfigCancelled as exc:
+                    raise Cancelled() from exc
+                except RuntimeConfigUnavailable:
+                    # Compatibility with Telnet-only/HTTP-auth installations:
+                    # use the same strict canonical validator, never legacy $$.
+                    if self.cancelled.is_set():
+                        raise Cancelled()
+                    self.callback("log", "HTTP-конфигурация MKS недоступна; читаю YAML по текущему TCP-соединению.")
+                    config_lines = self.command("$Config/Dump", timeout=12)
+                    source = "tcp"
+            else:
+                config_lines = self.command("$Config/Dump", timeout=12)
+            self.settings = fluidnc_configuration(config_lines)
+            self.settings["_fluidnc_config_source"] = source
             self.pen_firmware = fluidnc_pen_profile(self.settings)
             self.callback("pen_firmware", self.pen_firmware)
             if not settings_ready(self.settings, DLC32):

@@ -16,6 +16,7 @@ from machine_profiles import (UNO, DLC32, PROFILE_LABELS, profile_id, app_profil
                               save_selected_profile, pen_settings_directory)
 from branding import APP_NAME, APP_TITLE, apply_app_icon
 from wifi_discovery import discover_fluidnc, MDNS_AVAILABLE
+from wifi_address import ask_board_address, normalize_board_address
 from connection_preferences import load_verified_endpoints, remember_verified_endpoint
 from eventlog import EventLog, record_event
 
@@ -85,7 +86,7 @@ class App:
         self.simulation = False
         self.file_name = "Рисунок не выбран"
         # Canonical transport stays internal; the visible controls choose a
-        # connection method and a device, never an editable TCP address.
+        # connection method and a device. A local address is optional fallback.
         self.port = tk.StringVar(value="DEMO")
         self.connection_mode = tk.StringVar(value="Демо")
         self.active_connection_mode = "Демо"
@@ -93,6 +94,7 @@ class App:
         self.wifi_target = tk.StringVar(value="")
         self.connection_help = tk.StringVar(value="Демо работает без платы и не отправляет команды оборудованию.")
         self.wifi_status = tk.StringVar(value="Нажмите «Найти плату», когда ноутбук подключён к нужной сети.")
+        self.board_runtime_text = tk.StringVar(value="Время работы и причина перезапуска платы ещё не получены")
         self.wifi_devices = {}
         self.wifi_events = queue.Queue()
         self.wifi_search_token = None
@@ -424,9 +426,9 @@ class App:
         elif mode == "Wi-Fi":
             self.wifi_connection_frame.pack(fill="x")
             self.wifi_status_label.pack(anchor="w", pady=(2, 0))
-            self.connection_help.set("Сначала подключите ноутбук к сети FluidNC или общему роутеру, затем нажмите «Найти плату».")
+            self.connection_help.set("Сначала подключите ноутбук, MKS и камеру к общей сети роутера. Найдите плату или выберите её по адресу; камера подключается отдельно.")
             self.wifi_status.set("Поиск проверяет платы в вашей сети. Подключение выполняется отдельной кнопкой." if MDNS_AVAILABLE else
-                                 "Доступны точка доступа FluidNC, поиск по имени и сохранённые платы; расширенный поиск в сети роутера ограничен.")
+                                 "Недоступен расширенный поиск: используйте имя, сохранённую плату или «По адресу…».")
         else:
             self.demo_connection_frame.pack(fill="x")
             self.connection_help.set("Демо работает без платы и не отправляет команды оборудованию.")
@@ -445,7 +447,7 @@ class App:
         if mode == "Wi-Fi":
             endpoint = self.wifi_devices.get(self.wifi_target.get())
             if endpoint is None:
-                raise ValueError("Нажмите «Найти плату» и выберите найденную FluidNC.")
+                raise ValueError("Найдите FluidNC или выберите «По адресу…».")
             if app_profile(self) != DLC32:
                 raise ValueError("Wi-Fi работает с профилем MKS DLC32 / FluidNC.")
             return endpoint
@@ -458,6 +460,36 @@ class App:
             except ValueError:
                 self.port.set("")
         self.update_controls()
+
+    def can_choose_wifi_address(self):
+        return (not self.closed and not self.connected and not self.controller.busy and
+                not self.svg_loading and not self.wifi_searching and not self.wifi_worker_active() and
+                self.connection_mode.get() == "Wi-Fi")
+
+    def open_wifi_address(self):
+        if not self.can_choose_wifi_address():
+            return
+        initial = self.wifi_devices.get(self.wifi_target.get(), "fluidnc.local")
+        address = ask_board_address(self.root, initial=initial.removeprefix("tcp://"))
+        if address is not None:
+            self.use_wifi_address(address)
+
+    def use_wifi_address(self, value):
+        if not self.can_choose_wifi_address():
+            return False
+        try:
+            endpoint = normalize_board_address(value)
+        except ValueError as exc:
+            self.wifi_status.set(str(exc))
+            return False
+        existing = next((label for label, target in self.wifi_devices.items() if target == endpoint), None)
+        label = existing or endpoint.removeprefix("tcp://") + " · по адресу"
+        self.wifi_devices[label] = endpoint
+        self.wifi_boards["values"] = tuple(self.wifi_devices)
+        self.wifi_target.set(label)
+        self.wifi_status.set("Адрес выбран. Нажмите «Подключить» для проверки платы.")
+        self.select_connection_target()
+        return True
 
     def find_wifi_boards(self):
         if (self.closed or self.connected or self.controller.busy or self.svg_loading or
@@ -518,7 +550,7 @@ class App:
                 self.wifi_status.set("Найдена FluidNC. Нажмите «Подключить»." if len(labels) == 1 else
                                      f"Найдено плат: {len(labels)}. Выберите свою и нажмите «Подключить».")
             else:
-                self.wifi_status.set("FluidNC не найдена. Проверьте питание платы и сеть ноутбука, затем повторите поиск." +
+                self.wifi_status.set("FluidNC не найдена. Проверьте общую сеть или выберите «По адресу…»." +
                                      (" Расширенный поиск в сети роутера недоступен в этой установке приложения." if not MDNS_AVAILABLE else ""))
             self.select_connection_target()
 
@@ -575,6 +607,7 @@ class App:
                 "Первое подключение выполните без питания двигателей и соленоида.", parent=self.root):
             return
         self.status.set("Подключение…")
+        self.board_runtime_text.set("Время работы и причина перезапуска платы ещё не получены")
         self.submit("connect", port=self.port.get(), hold=self.hold.get(), machine_profile=selected)
 
     def change_machine_profile(self, event=None):
@@ -1025,6 +1058,7 @@ class App:
                 (self.connect_button, not busy and (self.connected or (has_target and not searching))),
                 (self.refresh_button, not connection_locked and self.connection_mode.get() == "USB"),
                 (self.wifi_search_button, not connection_locked and not searching and self.connection_mode.get() == "Wi-Fi"),
+                (self.wifi_address_button, not connection_locked and not searching and self.connection_mode.get() == "Wi-Fi"),
                 (self.configure_button, available), (self.board_setup_button, not busy),
                 (self.check_endstops_button, available and self.effective_machine_profile() == DLC32 and not self.simulation),
                 (self.first_button, motion_ready and not self.zero),
@@ -1175,6 +1209,7 @@ class App:
                 self.connected = self.zero = False
                 self.port_name = ""
                 self.simulation = False
+                self.board_runtime_text.set("Время работы и причина перезапуска платы ещё не получены")
                 self.settings = {}
                 self.endstop_report = None
                 self.pen_firmware = None
@@ -1187,8 +1222,22 @@ class App:
                 self.status.set("Не подключено · эскиз сохранён; для движения задайте оба угла заново")
                 self.hint.set("Рисунок и история правок сохранены. Можно редактировать и сохранить проект; автоматического продолжения движения нет.")
                 redraw = True
+            elif name == "board_runtime":
+                if isinstance(value, dict):
+                    uptime, reset = value.get("firmware_uptime_ms"), value.get("firmware_reset_reason")
+                    if type(uptime) is int and 0 <= uptime < 2**64 and type(reset) is int and 0 <= reset <= 255:
+                        seconds = uptime // 1000
+                        minutes, seconds = divmod(seconds, 60)
+                        hours, minutes = divmod(minutes, 60)
+                        duration = f"{hours} ч {minutes} мин" if hours else f"{minutes} мин {seconds} с"
+                        self.board_runtime_text.set(f"При подключении плата работала {duration} · код причины перезапуска: {reset}")
+                        record_event(self, "board.runtime", caller="pump", firmware_uptime_ms=uptime,
+                                     firmware_reset_reason=reset)
             elif name == "settings":
                 self.settings = value
+                config_source = value.get("_fluidnc_config_source")
+                if config_source in ("http", "tcp", "usb"):
+                    self.note("Настройки FluidNC прочитаны: " + config_source.upper())
                 reason = value.get("_fluidnc_reason")
                 if reason:
                     self.hint.set(str(reason))

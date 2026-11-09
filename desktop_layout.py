@@ -52,6 +52,9 @@ def build_workspace(app):
     a.wifi_boards.bind("<<ComboboxSelected>>", a.select_connection_target)
     a.wifi_search_button = ttk.Button(a.wifi_connection_frame, text="Найти плату", command=a.find_wifi_boards)
     a.wifi_search_button.pack(side="left")
+    a.wifi_address_button = ttk.Button(a.wifi_connection_frame, text="По адресу…", command=a.open_wifi_address,
+                                      style="Quiet.TButton")
+    a.wifi_address_button.pack(side="left", padx=(8, 0))
     a.demo_connection_frame = ttk.Frame(a.target_area)
     ttk.Label(a.demo_connection_frame, text="Без оборудования", style="Muted.TLabel").pack(side="left")
     a.demo_connection_frame.pack(fill="x")
@@ -304,7 +307,7 @@ def show_help(a):
     guide, details = page("Как пользоваться"), page("Текущее состояние")
     window.bind("<MouseWheel>", lambda event: help_canvases[tabs.select()].yview_scroll(int(-event.delta / 120), "units"))
     for title, text in (
-        ("Подключение", "Выберите USB, Wi-Fi или Демо. Для Wi-Fi сначала подключите ноутбук к сети FluidNC или общему роутеру и нажмите «Найти плату». Выберите найденную плату и отдельно нажмите «Подключить»."),
+        ("Подключение", "Выберите USB, Wi-Fi или Демо. Для общей Wi-Fi сети подключите ноутбук, MKS и камеру к одному роутеру. Нажмите «Найти плату» или «По адресу…», затем отдельно «Подключить». Подключение камеры задаётся в её окне; прошивки устройств настраивают отдельно."),
         ("Тестирование слева", "Стрелка выполняет один ход с заданными шагом и скоростью. Без флажка подъёма поднимите или выньте ручку вручную. Тест ручки выполняет подъём и возврат без движения осей."),
         ("Область на бумаге справа", "Подведите ручку к верхнему левому углу бумаги и сохраните его. Затем подведите к нижнему правому и сохраните второй угол. Эскиз A4 в окне не заменяет реальные углы."),
         ("Рисунок и запуск", "Создайте рисунок в редакторе, откройте SVG или выберите квадрат 10 мм. «Подвести к началу» только перемещает головку. «Начать рисование» запускает работу после отдельного подтверждения."),
@@ -312,7 +315,7 @@ def show_help(a):
     ):
         ttk.Label(guide, text=title, style="Section.TLabel").pack(anchor="w", pady=(0, 5))
         ttk.Label(guide, text=text, wraplength=600, justify="left").pack(anchor="w", pady=(0, 14))
-    for variable in (a.connection_help, a.wifi_status, a.wiring_text, a.jog_lift_hint,
+    for variable in (a.connection_help, a.wifi_status, a.board_runtime_text, a.wiring_text, a.jog_lift_hint,
                      a.pen_summary, a.pen_status, a.pen_legend, a.hint):
         ttk.Label(details, textvariable=variable, wraplength=600, justify="left").pack(anchor="w", pady=(0, 12))
     scale_widget_tree(window)

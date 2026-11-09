@@ -150,10 +150,14 @@ class SenderTests(unittest.TestCase):
     def test_stock_initialize_is_read_only_and_does_not_require_dwin(self):
         session, wire, callbacks = self.session(ProtocolWire(port="tcp://127.0.0.1:23"))
         session.network_interlock = lambda: False  # Old JD lease is intentionally absent.
-        session.initialize()
+        wire.peer_address = "127.0.0.1"
+        with patch("network_config.read_runtime_config", return_value=PHYSICAL_CONFIG.splitlines()) as read_config:
+            session.initialize()
+        read_config.assert_called_once_with(wire, session.cancelled)
         self.assertTrue(session.trusted)
         self.assertTrue(settings_ready(session.settings, DLC32))
-        self.assertEqual(wire.history, [b"$I\n", b"$Config/Dump\n", b"?"])
+        self.assertEqual(wire.history, [b"$I\n", b"?"])
+        self.assertEqual(session.settings["_fluidnc_config_source"], "http")
         self.assertFalse(session.has_actuated)
         self.assertEqual(session.pen_firmware["flood_pin"], "gpio.32:low")
         self.assertTrue(any(kind == "settings" for kind, _ in callbacks))
