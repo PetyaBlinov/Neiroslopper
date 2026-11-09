@@ -53,6 +53,7 @@ class AssistantWindow:
         self.token = object()
         self.worker = None
         self.timer = None
+        self.voice_window = None
         self.history = []
         self.context = {}
         self.context_revision = app.editor_revision()
@@ -120,6 +121,9 @@ class AssistantWindow:
                 menu.grab_release()
         examples.configure(command=show_examples)
         examples.pack(side="right")
+        self.voice_button = ttk.Button(request_head, text="Голос", command=self.open_voice,
+                                       style="Quiet.TButton")
+        self.voice_button.pack(side="right", padx=(0, 6))
         self.entry = tk.Text(left, height=4, width=1, wrap="word", bg=FIELD, fg=INK,
                              insertbackground=INK, relief="flat", highlightthickness=1,
                              highlightbackground=EDGE, highlightcolor=GOLD, padx=10, pady=8,
@@ -157,14 +161,14 @@ class AssistantWindow:
         self.transcript.configure(state="disabled")
 
     def fill_example(self, text):
-        if self.busy:
+        if self.busy or self.voice_active():
             return
         self.entry.delete("1.0", "end")
         self.entry.insert("1.0", text)
         self.entry.focus_set()
 
     def send(self, event=None):
-        if self.closed or self.busy:
+        if self.closed or self.busy or self.voice_active():
             return "break"
         prompt = self.entry.get("1.0", "end").strip()
         if not prompt or len(prompt) > 1800:
@@ -203,10 +207,43 @@ class AssistantWindow:
         return "break"
 
     def set_busy(self, busy):
-        self.send_button.configure(state="disabled" if busy else "normal")
+        locked = busy or self.voice_active()
+        self.send_button.configure(state="disabled" if locked else "normal")
         self.cancel_button.configure(state="normal" if busy else "disabled")
-        self.codex_checkbox.configure(state="disabled" if busy else "normal")
+        self.codex_checkbox.configure(state="disabled" if locked else "normal")
+        self.voice_button.configure(state="disabled" if locked else "normal")
         self.apply_button.configure(state="disabled")
+
+    def voice_active(self):
+        return self.voice_window is not None and not self.voice_window.closed
+
+    def open_voice(self):
+        if self.closed or self.busy:
+            return
+        if self.voice_active():
+            self.voice_window.root.lift()
+            return
+        from voice_ui import VoiceDialog
+        self.voice_window = VoiceDialog(self)
+        self.set_busy(False)
+
+    def insert_voice_text(self, text):
+        """Insert a reviewed draft; never submit or change the sketch."""
+        if self.closed or self.busy or not isinstance(text, str):
+            return False
+        text = text.strip()
+        if not text or any(ord(c) < 32 and c not in "\n\t" for c in text):
+            return False
+        prefix = self.entry.get("1.0", "insert")
+        suffix = self.entry.get("insert", "end-1c")
+        insertion = (" " if prefix and not prefix[-1].isspace() else "") + text
+        if suffix and not suffix[0].isspace():
+            insertion += " "
+        if len(prefix + insertion + suffix) > 1800:
+            return False
+        self.entry.insert("insert", insertion)
+        self.status.set("Голосовой текст вставлен. Проверьте запрос и нажмите «Подготовить»")
+        return True
 
     def pump_results(self):
         if self.closed:
@@ -267,7 +304,7 @@ class AssistantWindow:
         if self.pending is not None:
             if (self.pending.before.revision == self.app.editor_revision() and
                     not self.app.controller.busy and not self.app.svg_loading):
-                self.apply_button.configure(state="normal")
+                self.apply_button.configure(state="disabled" if self.busy or self.voice_active() else "normal")
             else:
                 self.pending = None
                 self.preview_title.set("Текущий эскиз")
@@ -283,7 +320,7 @@ class AssistantWindow:
              current.state.get("sheet_height") or 297)
 
     def apply_proposal(self):
-        if self.closed or self.busy or self.pending is None:
+        if self.closed or self.busy or self.voice_active() or self.pending is None:
             return
         proposal = self.pending
         self.applying = True
@@ -322,6 +359,8 @@ class AssistantWindow:
         self.history_action(self.app.redo_editor_preview)
 
     def cancel_request(self):
+        if self.voice_active():
+            self.voice_window.close()
         request = self.pending.request if self.pending is not None else self.request_prompt
         self.cancel.set()
         self.token = object()
@@ -350,6 +389,8 @@ class AssistantWindow:
         if self.closed:
             return
         self.closed = True
+        if self.voice_active():
+            self.voice_window.close()
         self.cancel.set()
         self.token = object()
         if self.timer is not None:

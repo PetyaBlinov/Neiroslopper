@@ -1,0 +1,9 @@
+# Optional local dictation, installed separately from requirements.txt.
+# Windows x64, regular CPython 3.11-3.14; no CUDA, Torch or Pillow required.
+# Models are downloaded only from the voice dialog after an explicit action.
+sounddevice==0.5.6
+faster-whisper==1.2.1
+ctranslate2==4.8.2
+huggingface-hub==1.33.0
+# PyAV 19 removes metadata_errors, still used by faster-whisper 1.2.1.
+av==18.1.0

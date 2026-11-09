@@ -19,6 +19,7 @@ ACTIONS = frozenset((
     "check_endstops", "draw", "startpoint", "pen_up_hold", "pen_down_hold",
     "pen_up", "pen_pulse", "zero", "corner", "jog", "scan", "stop",
     "assistant", "preview", "apply", "undo", "redo", "cancel", "close",
+    "voice", "record", "transcribe", "insert",
 ))
 STATES = frozenset((
     "Idle", "Run", "Jog", "Alarm", "Hold", "Door", "Check", "Home",

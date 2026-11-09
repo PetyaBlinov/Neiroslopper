@@ -20,7 +20,9 @@ Neiroslopper развивает исходный пульт команды пр�
 
 ## Зависимости
 
-Базовые библиотеки перечислены в requirements.txt, дополнительные — в requirements-camera.txt. Они сохраняют собственные лицензии и не перелицензируются этим проектом. Виртуальное окружение и локальные wheel-пакеты не являются исходным кодом Neiroslopper и не публикуются вместе с ним.
+Базовые библиотеки перечислены в requirements.txt, дополнительные — в requirements-camera.txt и requirements-voice.txt. Они сохраняют собственные лицензии и не перелицензируются этим проектом. Виртуальное окружение и локальные wheel-пакеты не являются исходным кодом Neiroslopper и не публикуются вместе с ним.
+
+Локальная речь использует [faster-whisper](https://github.com/SYSTRAN/faster-whisper), CTranslate2, sounddevice/PortAudio, Hugging Face Hub и PyAV. Модели [Systran/faster-whisper-tiny](https://huggingface.co/Systran/faster-whisper-tiny) и [small](https://huggingface.co/Systran/faster-whisper-small) скачиваются отдельно в локальный кэш; веса в этот репозиторий не включены.
 
 Для обнаружения плат по Wi-Fi используются **python-zeroconf 0.153.0** (LGPL-2.1-or-later) и **ifaddr 0.2.0** (MIT). Указания подтверждены метаданными установленных wheel-пакетов; их тексты лицензий сохраняются в составе пакетов.
 
@@ -30,6 +32,6 @@ FluidNC — отдельный проект. Здесь публикуется �
 
 Логотип предоставлен командой проекта для использования как иконка приложения. Отдельная лицензия на изображение в этой поставке не заявлена.
 
-## Помощник первого этапа
+## Помощник
 
-Обработчик запросов и контекст адаптированы из вклада levsasha2018-crypto, [PR №2](https://github.com/PetyaBlinov/Neiroslopper/pull/2), commit 0174a3abd3945288dad330e52b8f468cf58c13b1. Происхождение и изменения описаны в [assistant/PROVENANCE.md](assistant/PROVENANCE.md). Это не меняет общую лицензию проекта.
+Обработчик запросов, контекст и backend локальной речи адаптированы из вклада levsasha2018-crypto, [PR №2](https://github.com/PetyaBlinov/Neiroslopper/pull/2), commit 0174a3abd3945288dad330e52b8f468cf58c13b1. Происхождение и изменения описаны в [assistant/PROVENANCE.md](assistant/PROVENANCE.md). Это не меняет общую лицензию проекта.

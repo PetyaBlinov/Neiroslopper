@@ -129,9 +129,12 @@ class AssistantBackendTests(unittest.TestCase):
         self.assertTrue(saved["not_motion_state"])
         self.assertEqual(memory.snapshot(("editor", 3)), {})
 
-    def test_first_stage_help_does_not_claim_voice_or_smart_image_ui(self):
+    def test_help_describes_voice_review_and_does_not_claim_smart_image_ui(self):
         voice = self.answer("Как включить голосовой ввод?")
-        self.assertIn("ещё не подключён", voice.text)
+        self.assertIn("«Голос»", voice.text)
+        self.assertIn("«Вставить в запрос»", voice.text)
+        self.assertIn("локальное распознавание", voice.text)
+        self.assertIsNone(voice.plan)
         image = self.answer("Как проверить обводку Codex?")
         self.assertIn("пока не интегрированы", image.text)
         display = self.answer("Как работает DWIN?")
