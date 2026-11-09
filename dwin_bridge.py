@@ -10,6 +10,7 @@ import queue
 import struct
 import threading
 import time
+from eventlog import record_event
 
 
 TOUCH_VP = 0x1000
@@ -161,6 +162,22 @@ class CommandRouter:
         self.app = app
 
     def dispatch(self, event, *, armed, linked, now=None):
+        words = getattr(event, "words", ())
+        words = words if isinstance(words, (tuple, list)) else ()
+        vp = getattr(event, "vp", None)
+        record_event(self.app, "dwin.input", caller="dwin", vp=vp,
+                     key=words[0] if len(words) == 1 else None,
+                     words_count=len(words), armed=bool(armed), linked=bool(linked))
+        try:
+            code, text = self._dispatch(event, armed=armed, linked=linked, now=now)
+        except Exception as exc:
+            record_event(self.app, "dwin.error", caller="dwin", error_type=type(exc).__name__, success=False)
+            raise
+        record_event(self.app, "dwin.result", caller="dwin", vp=vp,
+                     result_code=code, success=code == 0)
+        return code, text
+
+    def _dispatch(self, event, *, armed, linked, now=None):
         app = self.app
         now = time.monotonic() if now is None else now
         if app.closed:

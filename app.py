@@ -17,6 +17,7 @@ from machine_profiles import (UNO, DLC32, PROFILE_LABELS, profile_id, app_profil
 from branding import APP_NAME, APP_TITLE, apply_app_icon
 from wifi_discovery import discover_fluidnc, MDNS_AVAILABLE
 from connection_preferences import load_verified_endpoints, remember_verified_endpoint
+from eventlog import EventLog, record_event
 
 
 def endstop_summary(report, now=None):
@@ -43,6 +44,7 @@ class App:
         self.closed = False
         self.pump_timer = None
         self.data_dir = data_dir
+        self.eventlog = EventLog(data_dir)
         from editor_tools.studio_store import Autosaves
         self.autosaves = Autosaves(data_dir) if data_dir is not None else None
         # Worker-owned objects must not retain this Tk window. The legacy
@@ -59,6 +61,7 @@ class App:
         self.paths = []
         self.preview_revision = 0
         self.editor_window = None
+        self.assistant_window = None
         self.editor_undo = None
         self.editor_history = EditHistory()
         self.editor_task = None
@@ -154,6 +157,7 @@ class App:
         scale_widget_tree(self.root)
         self.refresh_ports()
         self.update_controls()
+        record_event(self, "app.open", mode=self.connection_mode.get(), caller="ui")
         self.root.bind("<Escape>", lambda event: self.stop())
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.pump_timer = self.root.after(60, self.pump)
@@ -216,6 +220,13 @@ class App:
             self.editor_window.root.lift()
             return
         self.editor_window = EditorWindow(self)
+
+    def open_assistant(self):
+        from assistant_ui import AssistantWindow
+        if self.assistant_window is not None and not self.assistant_window.closed:
+            self.assistant_window.root.lift()
+            return
+        self.assistant_window = AssistantWindow(self)
 
     def studio_history(self):
         current = (self.paths,self.file_name,self.editor_task,self.editor_anchor)
@@ -284,28 +295,41 @@ class App:
     def invalidate_editor(self):
         if self.editor_window is not None and not self.editor_window.closed:
             self.editor_window.editor_changed()
+        if self.assistant_window is not None and not self.assistant_window.closed:
+            self.assistant_window.editor_changed()
 
     def apply_editor_preview(self, before, plan):
-        from editor_tools.planner import ACTION_KINDS, transform_paths
+        from editor_tools import planner, draft_context
+        return self._apply_editor_plan(before, plan, planner, draft_context, "Редактор", "ui")
+
+    def apply_assistant_preview(self, before, plan):
+        from assistant import planner, draft_context
+        return self._apply_editor_plan(before, plan, planner, draft_context, "Помощник", "assistant")
+
+    def _apply_editor_plan(self, before, plan, planner, draft_context, label, caller):
         sheet = self.drawing_sheet()
         if (self.controller.busy or self.svg_loading or sheet is None or
                 before.revision != self.editor_revision()):
             raise ValueError("Эскиз, калибровка или состояние пульта изменились. Повторите команду.")
-        if plan.kind not in ACTION_KINDS:
+        if not isinstance(plan, planner.Plan) or plan.kind not in planner.ACTION_KINDS:
             raise ValueError("Разрешены только изменения эскиза; команды станку недоступны.")
         # Recalculate against the current editor and validate again at commit time.
         # This method does not call Controller.submit, connect, jog or any serial method.
-        result = transform_paths(self.paths, plan, sheet.width, sheet.height)
+        result = planner.transform_paths(self.paths, plan, sheet.width, sheet.height)
+        # Validate metadata before changing history or paths as well as geometry.
+        task = draft_context.applied_task(plan, self.editor_task)
+        anchor = draft_context.plan_anchor(plan, self.editor_anchor)
         previous = (self.paths, self.file_name, self.editor_task, self.editor_anchor)
         self.editor_history.push(previous)
         self.paths = result
         self.file_name = "Эскиз редактора · " + plan.explanation
-        from editor_tools.draft_context import applied_task, plan_anchor
-        self.editor_task = applied_task(plan, self.editor_task)
-        self.editor_anchor = plan_anchor(plan, self.editor_anchor)
+        self.editor_task = task
+        self.editor_anchor = anchor
         self.loaded(preserve_history=True)
         self.editor_undo = (self.editor_revision(), previous)
-        self.note("Редактор изменил только эскиз. Движение не запускалось.")
+        self.note(label + " изменил только эскиз. Движение не запускалось.")
+        record_event(self, "sketch.applied", action="apply", caller=caller, success=True,
+                     revision=self.preview_revision, count=len(result))
         return self.editor_snapshot()
 
     def undo_editor_preview(self):
@@ -317,6 +341,7 @@ class App:
             (self.paths, self.file_name, self.editor_task, self.editor_anchor))
         self.loaded(preserve_history=True)
         self.editor_undo = (self.editor_revision(), None)
+        record_event(self, "sketch.undo", action="undo", caller="ui", revision=self.preview_revision)
         return self.editor_snapshot()
 
     def redo_editor_preview(self):
@@ -326,6 +351,7 @@ class App:
             (self.paths, self.file_name, self.editor_task, self.editor_anchor))
         self.loaded(preserve_history=True)
         self.editor_undo = (self.editor_revision(), None)
+        record_event(self, "sketch.redo", action="redo", caller="ui", revision=self.preview_revision)
         return self.editor_snapshot()
 
     def load_editor_project(self, project):
@@ -543,11 +569,16 @@ class App:
             if action not in ("disconnect","configure","hold","clear","unlock","check_endstops"):
                 params.setdefault("pen", self.read_pen_settings().as_dict())
         except ValueError as exc:
+            record_event(self, "action.rejected", action=action, reason="input_error", caller="submit")
             messagebox.showerror("Настройки ручки",str(exc),parent=self.root)
             return False
         if self.controller.submit(action, **params):
+            record_event(self, "action.accepted", action=action, caller="submit",
+                         mode=self.connection_mode.get(), connected=self.connected,
+                         simulation=self.simulation, zero=self.zero, sheet=self.sheet is not None)
             self.update_controls()
             return True
+        record_event(self, "action.rejected", action=action, caller="submit", reason="busy")
         return False
 
     def connect(self):
@@ -914,6 +945,8 @@ class App:
             messagebox.showerror("Проверьте ввод", str(exc), parent=self.root)
 
     def stop(self):
+        record_event(self, "app.stop", action="stop", caller="stop", reason="user_stop",
+                     connected=self.connected, busy=self.controller.busy)
         self.cancel_wifi_search(clear_results=True)
         self.dwin_pen_state = 0
         self.preserve_draft()
@@ -1156,6 +1189,8 @@ class App:
                 self.connected = True
                 self.port_name = value
                 self.simulation = value == "DEMO"
+                record_event(self, "connection.opened", action="connect", caller="pump",
+                             mode=self.connection_mode.get(), connected=True, simulation=self.simulation)
                 self.rebase_editor_history()
                 self.status.set("DEMO · симуляция, USB не используется" if self.simulation else
                                 f"{value} · {PROFILE_LABELS[self.effective_machine_profile()]} подключён")
@@ -1168,6 +1203,8 @@ class App:
                     else:
                         self.remembered_wifi = [value] + [item for item in self.remembered_wifi if item != value][:7]
             elif name == "disconnected":
+                record_event(self, "connection.closed", action="disconnect", caller="pump",
+                             mode=self.connection_mode.get(), connected=False)
                 self.dwin_pen_state = 0
                 self.preserve_draft()
                 self.preview_revision += 1
@@ -1202,6 +1239,7 @@ class App:
                 self.pen_firmware = value
                 self.note("Прошивка ручки: "+str(value) if value else "Профиль выхода ручки не подтверждён; автоматический режим недоступен.")
             elif name == "pen":
+                record_event(self, "pen.state", state=value, caller="pump")
                 self.dwin_pen_state = {"up": 1, "down": 2}.get(value, 0)
                 self.relay_state_unknown = value == "unknown"
                 power_raises = self.pen_power_raises.get()
@@ -1244,6 +1282,7 @@ class App:
             elif name == "progress":
                 latest_progress = value
             elif name == "finished":
+                record_event(self, "action.finished", action=value, caller="pump", reason="completed", success=True)
                 latest_progress = None
                 self.progress["value"] = 100
                 text = "Головка у начала. Установите ручку, не сдвигая оси, и нажмите «Начать рисование»." if value == "startpoint" else \
@@ -1260,6 +1299,8 @@ class App:
                 self.hint.set(text)
                 self.note(text)
             elif name == "error":
+                record_event(self, "action.error", caller="pump", reason="worker_error", success=False,
+                             error_type=value.get("error_type") if isinstance(value, dict) else None)
                 if isinstance(value, dict):
                     text = str(value.get("message", value.get("error", "Операция прервана")))
                     log_path = value.get("diagnostic_log", value.get("log_path"))
@@ -1317,6 +1358,8 @@ class App:
                 "Операция выполняется. Будет отправлен сброс; ноль потеряется. Закрыть?", parent=self.root):
             return
         self.closed = True
+        record_event(self, "app.closed", action="close", caller="close", reason="window_close",
+                     connected=self.connected, busy=self.controller.busy)
         self.cancel_wifi_search()
         # Auxiliary windows and autosaves can wait for workers. Stop motion
         # before any of those waits, as soon as closing is accepted.
@@ -1328,6 +1371,8 @@ class App:
             self.controller.worker.join(timeout=3)
         if self.dwin_window is not None:
             self.dwin_window.close()
+        if self.assistant_window is not None:
+            self.assistant_window.close()
         for name in ('pump_timer', 'redraw_timer'):
             identifier = getattr(self, name)
             if identifier is not None:

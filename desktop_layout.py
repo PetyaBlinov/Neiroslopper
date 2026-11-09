@@ -243,7 +243,9 @@ def build_workspace(app):
     ttk.Label(toolbar, text="Рисунок", style="Section.TLabel").pack(side="left")
     a.load_button = ttk.Button(toolbar, text="Открыть SVG…", command=a.open_svg)
     a.load_button.pack(side="right")
-    ttk.Button(toolbar, text="Создать в редакторе", command=a.open_editor).pack(side="right", padx=(12, 8))
+    a.assistant_button = ttk.Button(toolbar, text="Помощник", command=a.open_assistant)
+    a.assistant_button.pack(side="right", padx=(8, 8))
+    ttk.Button(toolbar, text="Редактор", command=a.open_editor).pack(side="right", padx=(12, 0))
     a.file_label = ttk.Label(right, text=a.file_name, style="Muted.TLabel", width=1)
     a.file_label.pack(fill="x", pady=(0, 10))
 
