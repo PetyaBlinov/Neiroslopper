@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 APP_NAME = 'Neiroslopper'
-APP_VERSION = '0.8.0'
+APP_VERSION = '0.9.0'
 APP_TITLE = f'{APP_NAME} {APP_VERSION} · Плоттер'
 ASSETS = Path(__file__).resolve().parent / 'assets'
 

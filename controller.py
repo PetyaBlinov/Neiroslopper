@@ -10,7 +10,7 @@ import re
 import threading
 import time
 from collections import deque
-from geometry import Sheet, route, validate_paths
+from geometry import Axes, Sheet, route, validate_paths
 from pen_lift import PenLiftSettings, PEN_MARKER, COOLDOWN_MS, batches, firmware_profile
 from serial_trace import SerialTrace, TransportError
 from machine_profiles import (UNO, DLC32, profile_id, settings_ready, fluidnc_identity,
@@ -23,9 +23,21 @@ MACHINE_ACCELERATION = 150.0
 MAX_JOG_DISTANCE = 100.0
 
 
+def dgus_markers(lines):
+    result = []
+    for line in lines:
+        if not isinstance(line, str):
+            continue
+        if line.startswith('[MSG:[JD-DGUS:') and line.endswith(']]'):
+            line = line[5:-1]
+        if line.startswith('[JD-DGUS:'):
+            result.append(line)
+    return result
+
+
 def board_runtime_info(lines):
     """Optional JD diagnostics; never proof of configuration or motion readiness."""
-    markers = [line for line in lines if isinstance(line, str) and line.startswith("[JD-DGUS:")]
+    markers = dgus_markers(lines)
     if len(markers) != 1 or not markers[0].endswith("]"):
         return {}
     result = {}
@@ -39,6 +51,22 @@ def board_runtime_info(lines):
             return {}
         result[key] = int(values[0])
     return result
+
+
+def native_panel_capabilities(lines):
+    """An exact optional identity marker selects the versioned panel protocol.
+
+    This is capability discovery only. Canonical YAML and the matching
+    numeric LAN peer are checked independently before any PC actuation.
+    """
+    markers = dgus_markers(lines)
+    if len(markers) != 1 or not re.fullmatch(r'\[JD-DGUS:2,(?:[A-Z_]+=[A-Za-z0-9_.-]+,)*[A-Z_]+=[A-Za-z0-9_.-]+\]', markers[0]):
+        return False, False
+    fields = markers[0][len('[JD-DGUS:2,'):-1].split(',')
+    keys = [field.split('=', 1)[0] for field in fields]
+    if len(keys) != len(set(keys)):
+        return False, False
+    return True, 'UI=1' in fields
 
 
 # Bounded lifts reserve time for settling and USB/status traffic. Stock
@@ -70,6 +98,11 @@ class GrblSession:
         self.simulated_machine_profile = None
         self.work_offset = None
         self.network_interlock = None
+        self.native_panel = self.panel_assistant = self.native_owned = False
+        self.native_client = None
+        self.native_context = None
+        self.native_axes = Axes()
+        self.reset_sent = False
         self.write_lock = threading.Lock()
         self.buffer = b""
         self.state = "Unknown"
@@ -141,9 +174,10 @@ class GrblSession:
     def abort(self, force=False):
         with self.write_lock:
             self.cancelled.set()
-            if self.trusted and (force or self.has_actuated or self.machine_profile == UNO):
+            if self.trusted and not self.reset_sent and (force or self.has_actuated or self.machine_profile == UNO):
                 try:
                     self._write_bytes(b"\x18")
+                    self.reset_sent = True
                 except Exception:
                     pass
             # Sending reset is not confirmation that the device received it.
@@ -155,10 +189,12 @@ class GrblSession:
 
     def close(self):
         with self.write_lock:
-            controlled = self.trusted and (self.has_actuated or self.machine_profile == UNO)
-            if controlled:
+            controlled = (self.trusted and (self.has_actuated or self.machine_profile == UNO) and
+                          (not self.native_panel or self.native_owned))
+            if controlled and not self.reset_sent:
                 try:
                     self._write_bytes(b"\x18")
+                    self.reset_sent = True
                 except Exception:
                     pass
             self.coil_on = None
@@ -268,6 +304,8 @@ class GrblSession:
                 self.deferred_lines.append(line)
 
     def command(self, command, timeout=8):
+        if self.native_panel and re.search(r'^\$(?:J=|H|X)|(?:^|\s)(?:M[34789]|G(?:0?[0-3]|10|92))(?=\s|[XYZ]|$)', command, re.I):
+            self.check_network_interlock()
         if re.search(r"\$J=|^\$(?:H|X)|(?:^|\s)(?:M3|M4|M7|M8|G0?[0-3])(?=\s|[XYZ]|$)", command, re.I):
             self.check_network_interlock()
         if re.search(r"^\$(?:J=|H|X)|(?:^|\s)(?:M[34789]|G(?:0?[0-3]|10|92))(?=\s|[XYZ]|$)", command, re.I):
@@ -333,8 +371,12 @@ class GrblSession:
         return {"state": self.state, "pins": self.active_pins,
                 "observed_at": self.last_status, "configured": configured}
 
-    def initialize(self):
+    def initialize(self, expected_mac=None):
         info = self.command("$I")
+        from wifi_discovery import board_mac
+        self.board_mac = board_mac(info)
+        if expected_mac is not None and (not self.board_mac or self.board_mac != expected_mac):
+            raise RuntimeError('Ответила другая плата; автоматическое подключение отменено.')
         if self.machine_profile == DLC32:
             if not fluidnc_identity(info):
                 raise RuntimeError("Выбран MKS DLC32 / FluidNC, но плата не подтвердила FluidNC. Проверьте профиль и COM-порт.")
@@ -344,6 +386,11 @@ class GrblSession:
             # A valid FluidNC banner alone cannot prove the relay polarity,
             # dual-X wiring or axis setup. Read the actual controller YAML.
             self.refresh_settings()
+            self.native_panel, self.panel_assistant = native_panel_capabilities(info)
+            markers = dgus_markers(info)
+            if markers and not self.native_panel and not (len(markers) == 1 and markers[0].startswith('[JD-DGUS:1,')):
+                raise RuntimeError('Не поддерживается версия или форма JD-DGUS. Доступ к движению не открыт.')
+            self.callback('native_panel', self.native_panel)
             self.trusted = True
             self.status()
             return
@@ -531,6 +578,16 @@ class GrblSession:
             raise ValueError("GPIO реле также занят другим узлом; управление запрещено.")
 
     def check_network_interlock(self):
+        if self.native_panel:
+            panel = self.native_client
+            if (not self.native_owned or panel is None or
+                    getattr(panel, 'peer_address', None) != getattr(self.wire, 'peer_address', None) or
+                    not panel.lease_ready()):
+                raise RuntimeError('Управление MKS не подтверждено каналом DWIN. Операция остановлена; повторного запуска нет.')
+            board = panel.snapshot()
+            if (board is None or self.native_context != (board.boot_id, board.generation) or
+                    board.axes != self.native_axes):
+                raise RuntimeError('Состояние листа на MKS изменилось во время операции. Отправлен СТОП.')
         # Stock FluidNC has no JD-DGUS lease service. A fresh response checks
         # connection health, but cannot stop firmware after a broken TCP link.
         if self.machine_profile == DLC32 and str(getattr(self.wire, "port", "")).lower().startswith("tcp:"):
@@ -833,7 +890,7 @@ class Controller:
                 return
             self.closed = True
         self.cancelled.set()
-        if self.session and self.session.has_actuated:
+        if self.session and self.session.has_actuated and (not self.session.native_panel or self.session.native_owned):
             self.session.abort()
         if self.worker.is_alive():
             self.jobs.put((None, {}))
@@ -863,11 +920,12 @@ class Controller:
                         if self.cancelled.is_set():
                             raise Cancelled()
                         state, _ = self.session.status()
-                        if state not in ("Idle", "Alarm") or (self.zero and state == "Alarm"):
+                        if ((not self.session.native_panel or self.session.native_owned) and
+                                (state not in ("Idle", "Alarm") or (self.zero and state == "Alarm"))):
                             raise RuntimeError(f"Неожиданное состояние {state}; калибровка сброшена.")
                     except Exception as exc:
                         detail = self.error_detail(exc)
-                        if self.session:
+                        if self.session and (not self.session.native_panel or self.session.native_owned):
                             self.session.abort()
                         self.disconnect()
                         if not isinstance(exc, Cancelled):
@@ -879,7 +937,7 @@ class Controller:
                     self.busy = False
                 return
             try:
-                self.execute(action, params)
+                self.execute_job(action, params)
             except ValueError as exc:
                 detail = self.error_detail(exc)
                 if self.session and self.session.has_actuated and self.session.coil_on is not False:
@@ -888,7 +946,7 @@ class Controller:
                 self.emit("error", detail)
             except Exception as exc:
                 detail = self.error_detail(exc)
-                if self.session:
+                if self.session and (not self.session.native_panel or self.session.native_owned):
                     self.session.abort()
                 self.disconnect()
                 if not isinstance(exc, Cancelled):
@@ -897,6 +955,65 @@ class Controller:
                 with self.lock:
                     self.busy = False
                 self.emit("done", action)
+
+    def execute_job(self, action, params):
+        """Keep board-local controls and PC streaming mutually exclusive."""
+        session = self.session
+        if not session or not session.native_panel or action in ('connect', 'disconnect', 'configure', 'check_endstops'):
+            return self.execute(action, params)
+        if action in ('zero', 'corner', 'clear', 'hold'):
+            raise ValueError('На Native DWIN углы и положение листа хранит MKS; используйте экран или кнопки области.')
+        panel = params.get('panel_client')
+        if self.closed or self.cancelled.is_set():
+            raise Cancelled()
+        peer = getattr(session.wire, 'peer_address', None)
+        if (not peer or not str(getattr(session.wire, 'port', '')).lower().startswith('tcp:') or
+                panel is None or panel.peer_address != peer):
+            raise ValueError('Для Native DWIN подключите Wi-Fi и канал задач той же MKS (8888).')
+        if not settings_ready(session.settings, DLC32) or session.settings.get('_fluidnc_wiring') != 'neiroslopper_ttl':
+            raise ValueError('Рабочая конфигурация FluidNC не подтверждена.')
+        if not panel.claim():
+            raise ValueError('MKS занята или связь DWIN потеряна. Дождитесь остановки и повторите действие.')
+        session.native_owned, session.native_client = True, panel
+        request = params.get('panel_request')
+        try:
+            board = panel.snapshot()
+            if self.cancelled.is_set() or not board or not board.confirmed or not board.pc_owned or not panel.lease_ready():
+                raise ValueError('MKS не подтвердила передачу управления ПК.')
+            if request is not None and request != (board.boot_id, board.generation, board.request_id, board.request_key):
+                raise ValueError('Запрос на экране или границы листа уже изменились.')
+            expected = params.get('panel_context')
+            if expected is not None and expected != (board.boot_id, board.generation):
+                raise ValueError('Границы листа изменились. Проверьте эскиз и повторите действие.')
+            board_axes = board.axes
+            if params.get('axes') != board_axes:
+                raise ValueError('Направления листа на MKS изменились. Повторите действие.')
+            session.native_context = board.boot_id, board.generation
+            session.native_axes = board_axes
+            self.zero = board.has_zero
+            self.sheet = Sheet(board.width_mm, board.height_mm) if board.has_sheet else None
+            self.axes = board_axes if self.zero else None
+            if self.zero:
+                session.refresh_g54_offset()
+                if session.work_offset is None or math.dist(session.work_offset, board.origin_mm) > .003:
+                    raise ValueError('Ноль MKS изменился. Задайте оба угла заново.')
+            result = self.execute(action, params)
+            if request is not None:
+                panel.respond(request[2], 0)
+            return result
+        except ValueError:
+            if session.coil_on is not False:
+                session.abort()
+            raise
+        except Exception:
+            session.abort()
+            raise
+        finally:
+            if not self.cancelled.is_set():
+                if not panel.release():
+                    session.abort(force=True)
+                    raise RuntimeError('MKS не подтвердила завершение управления ПК. Отправлен СТОП.')
+                session.native_owned = False
 
     def execute(self, action, params):
         if self.closed:
@@ -938,7 +1055,7 @@ class Controller:
                 if self.cancelled.wait(2.5):
                     raise Cancelled()
                 wire.reset_input_buffer()
-            self.session.initialize()
+            self.session.initialize(expected_mac=params.get('expected_mac'))
             self.session.power_raises = self.pen.power_raises
             self.session.pen_down = None if self.machine_profile == DLC32 else self.pen.power_raises
             if self.machine_profile == UNO:

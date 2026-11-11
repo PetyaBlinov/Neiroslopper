@@ -69,6 +69,8 @@ class App:
         self.editor_anchor = None
         self.camera_window = None
         self.dwin_window = None
+        self.native_panel = False
+        self.panel_calibration = None
         self.network_lease_seen = False
         self.dwin_pen_state = 0  # Commanded state only; no physical pen sensor.
         self.svg_events = queue.Queue()
@@ -92,6 +94,9 @@ class App:
         self.active_connection_mode = "Демо"
         self.usb_port = tk.StringVar(value="")
         self.wifi_target = tk.StringVar(value="")
+        self.auto_wifi = tk.BooleanVar(value=False)
+        from wifi_reconnect import Reconnect
+        self.reconnect = Reconnect()
         self.connection_help = tk.StringVar(value="Демо работает без платы и не отправляет команды оборудованию.")
         self.wifi_status = tk.StringVar(value="Нажмите «Найти плату», когда ноутбук подключён к нужной сети.")
         self.board_runtime_text = tk.StringVar(value="Время работы и причина перезапуска платы ещё не получены")
@@ -162,6 +167,11 @@ class App:
         self.pump_timer = self.root.after(60, self.pump)
 
     def axes(self):
+        if self.native_panel:
+            panel = self.panel_client()
+            board = panel.snapshot() if panel else None
+            if board and board.confirmed:
+                return board.axes
         return Axes(self.swap.get(), -1 if self.reverse_right.get() else 1,
                     -1 if self.reverse_down.get() else 1)
 
@@ -231,12 +241,87 @@ class App:
         current = (self.paths,self.file_name,self.editor_task,self.editor_anchor)
         return list(self.editor_history.past)+[current]+list(reversed(self.editor_history.future)),len(self.editor_history.past)
 
-    def open_dwin(self):
-        if self.dwin_window is not None and not self.dwin_window.closed:
+    def open_dwin(self, *, show=True, connect_native=False):
+        from dwin_ui import DwinWindow, NativeDwinWindow
+        native = self.native_panel
+        if self.dwin_window is not None and getattr(self.dwin_window, 'native', False) != native:
+            self.dwin_window.close()
+        if self.dwin_window is None or self.dwin_window.closed:
+            self.dwin_window = (NativeDwinWindow if native else DwinWindow)(self, show=show)
+            if native and connect_native:
+                self.dwin_window.start()
+        if show:
+            self.dwin_window.window.deiconify()
             self.dwin_window.window.lift()
+
+    def panel_client(self):
+        window = getattr(self, 'dwin_window', None)
+        return window.bridge if window is not None and not window.closed and getattr(window, 'native', False) else None
+
+    def apply_panel_state(self, board):
+        previous_position = self.position
+        identity = ((board.boot_id, board.generation, board.has_zero, board.has_sheet, board.axes)
+                    if board and board.confirmed and not self.controller.cancelled.is_set() else None)
+        changed = identity != self.panel_calibration
+        if changed:
+            self.preserve_draft()
+            self.panel_calibration = identity
+            self.preview_revision += 1
+            self.cancel_svg()
+            self.zero = bool(identity and board.has_zero)
+            self.sheet = Sheet(board.width_mm, board.height_mm) if identity and board.has_sheet else None
+            if self.sheet:
+                self.draft_sheet = self.sheet
+                self.paper_text.set(f'Лист MKS: {self.sheet.width:.2f} × {self.sheet.height:.2f} мм')
+            else:
+                self.paper_text.set('Первый угол сохранён на MKS' if self.zero else self.draft_notice())
+            self.rebase_editor_history()
+            self.invalidate_editor()
+        if identity:
+            origin = board.origin_mm if board.has_zero else (0.0, 0.0)
+            self.position = tuple(a - b for a, b in zip(board.position_mm, origin))
+            right, down = board.axes.paper(self.position)
+            self.coordinates.set(f'Вправо: {right:.2f} · вниз: {down:.2f} мм')
+        else:
+            self.position = None
+            self.coordinates.set('Положение: —')
+        names = {12: 'К началу', 13: 'Рисовать', 15: 'Тестовый квадрат',
+                 16: 'Открыть SVG', 17: 'Редактор', 18: 'Камера'}
+        if identity and board.request_id and board.request_key in names:
+            label = 'С экрана: ' + names[board.request_key] + '…'
+            state = 'disabled' if board.busy or self.controller.busy or self.svg_loading else 'normal'
+            if self.panel_request_button.cget('text') != label or str(self.panel_request_button.cget('state')) != state:
+                self.panel_request_button.configure(text=label, state=state)
+            if not self.panel_request_button.winfo_manager():
+                self.panel_request_button.pack(side='right', padx=(8, 0))
+        else:
+            self.panel_request_button.pack_forget()
+        if changed or self.position != previous_position:
+            self.request_redraw()
+
+    def reject_panel_request(self, request):
+        panel = self.panel_client()
+        board = panel.snapshot() if panel else None
+        if board and request == (board.boot_id, board.generation, board.request_id, board.request_key):
+            panel.respond(request[2], 7)
+
+    def handle_panel_request(self):
+        panel = self.panel_client()
+        board = panel.snapshot() if panel else None
+        if not board or not board.confirmed or not board.request_id or board.busy or self.controller.busy or self.svg_loading:
             return
-        from dwin_ui import DwinWindow
-        self.dwin_window = DwinWindow(self)
+        request = (board.boot_id, board.generation, board.request_id, board.request_key)
+        if board.request_key in (12, 13):
+            if not board.has_sheet or not self.paths:
+                self.note('DWIN: задайте оба угла и загрузите рисунок, затем повторите запрос.')
+                panel.respond(board.request_id, 4)
+            else:
+                self.feed.set(str(board.speed_pct))
+                (self.go_start if board.request_key == 12 else self.draw)(panel_request=request)
+        else:
+            callback = {15: self.load_test, 16: self.open_svg, 17: self.open_editor, 18: self.open_camera}.get(board.request_key)
+            if callback is not None and panel.respond(board.request_id, 9):
+                callback()
 
     def open_camera(self):
         try:
@@ -413,6 +498,8 @@ class App:
             mode = self.active_connection_mode if self.active_connection_mode in ("USB", "Wi-Fi", "Демо") else "Демо"
             self.connection_mode.set(mode)
         self.cancel_wifi_search(clear_results=True)
+        self.reconnect.disarm()
+        self.auto_wifi.set(False)
         self.active_connection_mode = mode
         if mode == "Wi-Fi" and app_profile(self) != DLC32:
             self.machine_profile.set(PROFILE_LABELS[DLC32])
@@ -455,6 +542,8 @@ class App:
 
     def select_connection_target(self, event=None):
         if not self.connected and not self.controller.busy:
+            self.reconnect.disarm()
+            self.auto_wifi.set(False)
             try:
                 self.port.set(self.connection_target())
             except ValueError:
@@ -477,6 +566,8 @@ class App:
     def use_wifi_address(self, value):
         if not self.can_choose_wifi_address():
             return False
+        self.reconnect.disarm()
+        self.auto_wifi.set(False)
         try:
             endpoint = normalize_board_address(value)
         except ValueError as exc:
@@ -496,6 +587,8 @@ class App:
                 self.connection_mode.get() != "Wi-Fi" or self.wifi_worker_active()):
             return False
         self.cancel_wifi_search(clear_results=True)
+        self.reconnect.disarm()
+        self.auto_wifi.set(False)
         token, cancel = object(), threading.Event()
         self.wifi_search_token, self.wifi_search_cancel = token, cancel
         self.wifi_searching = True
@@ -558,6 +651,17 @@ class App:
         if self.closed:
             return False
         params.setdefault("axes", self.axes())
+        if self.native_panel and action not in ('connect', 'disconnect', 'configure', 'check_endstops'):
+            panel = self.panel_client()
+            board = panel.snapshot() if panel else None
+            if action in ('zero', 'corner', 'clear'):
+                accepted = bool(board and not self.controller.busy and panel.calibrate({'clear': 0, 'zero': 1, 'corner': 2}[action]))
+                if not accepted:
+                    self.note('DWIN: MKS занята или канал панели не подключён; углы не изменены.')
+                return accepted
+            params['panel_client'] = panel
+            if board:
+                params['panel_context'] = board.boot_id, board.generation
         if action == "jog":
             # The same explicit manual policy applies to arrows and DWIN.
             params.setdefault("lift_pen", self.jog_lift.get())
@@ -581,6 +685,8 @@ class App:
         if self.closed or self.controller.busy or self.svg_loading:
             return False
         if self.connected:
+            self.reconnect.disarm()
+            self.auto_wifi.set(False)
             self.submit("disconnect")
             return
         if self.wifi_searching or self.wifi_worker_active():
@@ -593,7 +699,7 @@ class App:
             return False
         self.port.set(target)
         if (not self.connected and self.dwin_window is not None and
-                self.dwin_window.bridge.thread is not None and self.dwin_window.bridge.thread.is_alive() and
+                self.dwin_window.bridge is not None and self.dwin_window.bridge.thread is not None and self.dwin_window.bridge.thread.is_alive() and
                 self.port.get().casefold() == str(self.dwin_window.bridge.port).casefold()):
             messagebox.showerror("Порт занят экраном", "Для Arduino и DWIN нужны разные COM-порты.", parent=self.root)
             return
@@ -609,6 +715,34 @@ class App:
         self.status.set("Подключение…")
         self.board_runtime_text.set("Время работы и причина перезапуска платы ещё не получены")
         self.submit("connect", port=self.port.get(), hold=self.hold.get(), machine_profile=selected)
+
+    def toggle_auto_wifi(self):
+        self.reconnect.disarm()
+        if not self.auto_wifi.get():
+            return
+        session = self.controller.session
+        try:
+            if not self.connected or not self.network_controller():
+                raise ValueError('Сначала подключитесь к своей MKS по Wi-Fi.')
+            self.reconnect.arm(self.port_name, getattr(session, 'board_mac', ''))
+            self.wifi_status.set('Автосвязь включена для этой платы. После обрыва углы задаются заново.')
+        except ValueError as exc:
+            self.auto_wifi.set(False)
+            self.wifi_status.set(str(exc))
+
+    def poll_reconnect(self):
+        if (self.closed or not self.auto_wifi.get() or self.connection_mode.get() != 'Wi-Fi' or
+                self.connected or self.controller.busy or self.svg_loading or self.wifi_searching):
+            return
+        endpoint = self.reconnect.poll()
+        if endpoint is not None:
+            mac = self.reconnect.mac
+            self.port.set(endpoint)
+            label = 'Своя MKS · ' + endpoint
+            self.wifi_devices[label] = endpoint
+            self.wifi_boards['values'] = tuple(self.wifi_devices)
+            self.wifi_target.set(label)
+            self.submit('connect', port=endpoint, hold=self.hold.get(), machine_profile=DLC32, expected_mac=mac)
 
     def change_machine_profile(self, event=None):
         if self.connected or self.controller.busy:
@@ -656,6 +790,9 @@ class App:
         return UNO if self.simulation and self.connected else app_profile(self)
 
     def machine_ready(self):
+        if self.native_panel:
+            return (settings_ready(self.settings, self.effective_machine_profile()) and
+                    self.settings.get('_fluidnc_wiring') == 'neiroslopper_ttl' and self.network_lease_ready())
         return (settings_ready(self.settings, self.effective_machine_profile()) and
                 (not self.network_controller() or self.network_lease_ready()))
 
@@ -674,6 +811,12 @@ class App:
         if session is None or session.machine_profile != DLC32:
             return False
         wire = getattr(session, "wire", None)
+        if getattr(session, 'native_panel', False):
+            panel = self.panel_client()
+            board = panel.snapshot() if panel else None
+            return bool(board and board.confirmed and not board.busy and not board.pc_owned and
+                        panel.peer_address == getattr(wire, 'peer_address', None) and
+                        not self.controller.cancelled.is_set())
         return bool(str(getattr(wire, "port", "")).lower().startswith("tcp:") and
                     getattr(wire, "peer_address", None) is not None and
                     not self.controller.cancelled.is_set())
@@ -904,17 +1047,19 @@ class App:
                 from editor_project import SketchProject
                 self.autosaves.schedule('Эскиз плоттера',SketchProject(self.drawing_sheet(),self.paths,self.file_name[:500],self.editor_task,self.editor_anchor))
 
-    def go_start(self):
+    def go_start(self, *, panel_request=None):
         if messagebox.askokcancel("Переход к началу",
                 ("Ручка будет поднята на время перемещения. После остановки питание отключится, ручка опустится.\n\n" if self.pen_enabled.get() and self.pen_power_raises.get() else
                  "Ручка будет автоматически поднята перед перемещением. Проверьте свободный ход и возвратную пружину.\n\n" if self.pen_enabled.get() else
                  "Выньте или вручную поднимите ручку, не сдвигая головку. Автоподъём отключён!\n\n")+
                 "Головка переместится к первой точке рисунка.", parent=self.root):
-            self.start_job("startpoint")
+            return self.start_job("startpoint", panel_request=panel_request)
+        self.reject_panel_request(panel_request)
 
-    def draw(self):
+    def draw(self, *, panel_request=None):
         if not self.zero or self.sheet is None:
             messagebox.showerror("Нужны два угла", "Эскиз сохранён. Перед рисованием заново задайте оба угла листа.", parent=self.root)
+            self.reject_panel_request(panel_request)
             return
         if messagebox.askokcancel("Начать рисование?",
                 f"Область: {self.sheet.width:.1f} × {self.sheet.height:.1f} мм.\n\n"
@@ -928,20 +1073,27 @@ class App:
                 "Возврата в угол после завершения нет.\n\n"
                 + ("Сейчас выбран DEMO: реальные моторы не подключены." if self.simulation else
                    "Это запустит реальные моторы. Первый прогон сделайте без ручки и на малой скорости."), parent=self.root):
-            self.start_job("draw")
+            return self.start_job("draw", panel_request=panel_request)
+        self.reject_panel_request(panel_request)
 
-    def start_job(self, action):
+    def start_job(self, action, *, panel_request=None):
         try:
             if not self.connected or not self.zero or self.sheet is None:
                 raise ValueError("Эскиз сохранён. Подключитесь и заново задайте оба угла перед движением.")
             from geometry import validate_paths
             validate_paths(self.paths, self.sheet)
             self.progress["value"] = 0
-            self.submit(action, paths=[list(path) for path in self.paths], feed=self.get_feed())
+            accepted = self.submit(action, paths=[list(path) for path in self.paths], feed=self.get_feed(), panel_request=panel_request)
+            if not accepted:
+                self.reject_panel_request(panel_request)
+            return accepted
         except ValueError as exc:
             messagebox.showerror("Проверьте ввод", str(exc), parent=self.root)
+            self.reject_panel_request(panel_request)
 
     def stop(self):
+        self.reconnect.disarm()
+        self.auto_wifi.set(False)
         record_event(self, "app.stop", action="stop", caller="stop", reason="user_stop",
                      connected=self.connected, busy=self.controller.busy)
         self.cancel_wifi_search(clear_results=True)
@@ -950,6 +1102,9 @@ class App:
         self.preview_revision += 1
         self.cancel_svg()
         self.controller.stop()
+        panel = self.panel_client()
+        if panel is not None:
+            panel.close()
         self.zero, self.sheet = False, None
         self.position = None
         self.relay_state_unknown = True
@@ -991,6 +1146,8 @@ class App:
             "Загрузка SVG…" if self.svg_loading else "Выполняется…" if busy else
             "Подключите плату" if not self.connected else
             "Остановлено · подключитесь заново" if self.controller.cancelled.is_set() else
+            "Для Native DWIN выберите Wi-Fi" if self.native_panel and not self.network_controller() else
+            "Откройте DWIN и подключите панель" if self.native_panel and not self.network_lease_ready() else
             "Проверьте настройки платы" if not ready else
             "Проверьте настройки реле" if not self.pen_ready() else
             "Задайте верхний левый угол" if not self.zero else
@@ -1081,7 +1238,7 @@ class App:
             # worker still checks the actual relay mapping and controller Idle.
             _configure(widget, state="normal" if available and self.pen_test_ready() else "disabled")
         for widget in self.axis_widgets:
-            _configure(widget, state="normal" if not busy and not self.zero else "disabled")
+            _configure(widget, state="normal" if not busy and not self.zero and not self.native_panel else "disabled")
         for button in self.connection_mode_buttons:
             _configure(button, state="disabled" if connection_locked else "normal")
         _configure(self.ports, state="readonly" if not connection_locked and self.connection_mode.get() == "USB" else "disabled")
@@ -1181,7 +1338,14 @@ class App:
                 name, value = self.controller.events.get_nowait()
             except queue.Empty:
                 break
-            if name == "connected":
+            if name == 'native_panel':
+                self.native_panel = value is True
+                if self.native_panel:
+                    self.swap.set(False)
+                    self.reverse_right.set(False)
+                    self.reverse_down.set(False)
+                    self.note('Native DWIN: логические X вправо, Y вниз; углы хранит MKS.')
+            elif name == "connected":
                 self.connected = True
                 self.port_name = value
                 self.simulation = value == "DEMO"
@@ -1191,6 +1355,8 @@ class App:
                 self.status.set("DEMO · симуляция, USB не используется" if self.simulation else
                                 f"{value} · {PROFILE_LABELS[self.effective_machine_profile()]} подключён")
                 self.note("Подключено: " + value + ". Ноль нужно выставить заново.")
+                if self.native_panel and self.network_controller():
+                    self.open_dwin(show=False, connect_native=True)
                 if str(value).lower().startswith("tcp://"):
                     try:
                         remember_verified_endpoint(self.data_dir, value)
@@ -1199,6 +1365,11 @@ class App:
                     else:
                         self.remembered_wifi = [value] + [item for item in self.remembered_wifi if item != value][:7]
             elif name == "disconnected":
+                if self.panel_client() is not None:
+                    self.dwin_window.close()
+                self.native_panel = False
+                self.panel_calibration = None
+                self.panel_request_button.pack_forget()
                 record_event(self, "connection.closed", action="disconnect", caller="pump",
                              mode=self.connection_mode.get(), connected=False)
                 self.dwin_pen_state = 0
@@ -1261,12 +1432,16 @@ class App:
                         "unknown":"Состояние реле неизвестно: доставка сброса не подтверждена. При обрыве связи отключите силовое питание вручную."}.get(value,str(value))
                 self.pen_status.set(text + " Положение датчиком не измеряется.")
             elif name == "position":
+                if self.native_panel:
+                    continue
                 state, self.position = value
                 latest_position = value
                 redraw = True
             elif name == "endstops":
                 self.endstop_report = value
             elif name == "calibration":
+                if self.native_panel:
+                    continue
                 self.preserve_draft()
                 self.preview_revision += 1
                 self.cancel_svg()
@@ -1356,6 +1531,7 @@ class App:
         if redraw:
             self.redraw()
         self.update_network_lease()
+        self.poll_reconnect()
         self.update_controls()
         if self.dwin_window is not None:
             self.dwin_window.pump()
@@ -1368,6 +1544,7 @@ class App:
                 "Операция выполняется. Будет отправлен сброс; ноль потеряется. Закрыть?", parent=self.root):
             return
         self.closed = True
+        self.reconnect.disarm()
         record_event(self, "app.closed", action="close", caller="close", reason="window_close",
                      connected=self.connected, busy=self.controller.busy)
         self.cancel_wifi_search()

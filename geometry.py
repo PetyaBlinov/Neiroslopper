@@ -91,13 +91,20 @@ class ImportedPaths(list):
 
 def load_svg(filename, sheet, margin=3.0):
     """Outline-only SVG import. Reject unsupported rendering instead of guessing."""
+    with FilePath(filename).open('rb') as stream:
+        raw = stream.read(3_000_001)
+    return load_svg_bytes(raw, sheet, margin)
+
+
+def load_svg_bytes(raw, sheet, margin=3.0, *, paper_coordinates=False):
+    """Render authored vector strokes. In paper space one unit equals one millimetre."""
     from svgelements import SVG, Shape, Path, Move, Line, Close
     if not math.isfinite(margin) or margin < 0 or 2 * margin >= min(sheet.width, sheet.height):
         raise ValueError("Поле должно быть неотрицательным и меньше половины короткой стороны.")
-    raw = FilePath(filename).read_bytes()
     if len(raw) > 3_000_000:
         raise ValueError("SVG слишком большой: максимум 3 МБ.")
-    if b"<!DOCTYPE" in raw.upper() or b"<!ENTITY" in raw.upper():
+    markers = raw.replace(b'\x00', b'').upper()  # Also recognize UTF-16/32 markup.
+    if b"<!DOCTYPE" in markers or b"<!ENTITY" in markers:
         raise ValueError("SVG с DTD/ENTITY не поддерживается.")
     root = ET.fromstring(raw)
     actual_size = root.get("data-plotter-size") == "actual"
@@ -136,7 +143,12 @@ def load_svg(filename, sheet, margin=3.0):
     height = max(b[3] for b in boxes) - top
     if max(width, height) <= 0:
         raise ValueError("У рисунка нулевой размер.")
-    if actual_size:
+    if paper_coordinates:
+        if not sheet.contains((left, top)) or not sheet.contains((left + width, top + height)):
+            raise ValueError("Рисунок выходит за заданный прямоугольник.")
+        scale = 1.0
+        ox, oy = left, top
+    elif actual_size:
         # SVG geometry is resolved into CSS pixels; convert those to mm.
         # Calibration samples must never grow or shrink to fill the paper.
         scale = 25.4 / 96
@@ -197,4 +209,4 @@ def load_svg(filename, sheet, margin=3.0):
             result.append(current)
         current = []
     validate_paths(result, sheet)
-    return ImportedPaths(result, actual_size)
+    return ImportedPaths(result, actual_size or paper_coordinates)

@@ -27,8 +27,8 @@ _gate = threading.Lock()
 MAX_INPUT = 110_000
 MAX_OUTPUT = 100_000
 DEFAULT_EFFORT = {'structured': 'low', 'chat': 'low', 'creative': 'high',
-                  'vision_review': 'high', 'web_reference': 'low'}
-EFFORTS = ('low', 'medium', 'high')
+                  'vision_review': 'high', 'web_reference': 'low', 'web_drawing': 'high'}
+EFFORTS = ('low', 'medium', 'high', 'xhigh')
 _REASONING_REQUEST = re.compile(r'\b(?:почему|сравни\w*|обосну\w*|проанализиру\w*|разбер\w*|'
                                 r'compare|analy[sz]e|why|reason|trade.?off)\b', re.I)
 DISABLED_FEATURES = ('shell_tool', 'unified_exec', 'apps', 'plugins', 'hooks',
@@ -133,6 +133,21 @@ def _automatic_effort(channel, messages):
                 any(item['role'] == 'assistant' for item in messages)):
             return 'medium'
     return DEFAULT_EFFORT[channel]
+
+
+def resume_command(path, directory, session_id):
+    from .saved_chat import thread_id
+    identifier = thread_id(session_id)
+    arguments = command(path, directory, None, effort='xhigh')
+    for flag in ('--ephemeral',):
+        arguments.remove(flag)
+    for flag in ('--sandbox', '--cd', '--color'):
+        index = arguments.index(flag)
+        del arguments[index:index+2]
+    arguments[3:3] = ['resume']
+    arguments[-1:] = ['-c', 'sandbox_mode="read-only"', '-c',
+                      'cwd=' + json.dumps(str(directory)), identifier, '-']
+    return arguments
 
 
 def strict_schema(source):
@@ -258,17 +273,25 @@ def checked_images(images):
     return tuple(output)
 
 
-def generate(messages, *, channel, output_schema=None, cancel=None, timeout=180, images=(), effort=None):
+def generate(messages, *, channel, output_schema=None, cancel=None, timeout=180, images=(), effort=None,
+             resume_thread=None):
     if channel not in DEFAULT_EFFORT:
         raise CloudError('Неизвестный канал ответа.')
-    web_reference = channel == 'web_reference'
+    web_reference = channel in ('web_reference', 'web_drawing')
+    if resume_thread is not None:
+        from .saved_chat import thread_id
+        resume_thread = thread_id(resume_thread)
+        if channel != 'chat' or output_schema is not None or images:
+            raise CloudError('Привязанный чат используется только для текстовых вопросов.')
+        effort = 'xhigh'
     if web_reference:
         if (output_schema is None or not isinstance(messages, (list, tuple)) or len(messages) != 2 or
                 any(not isinstance(item, dict) or set(item) != {'role', 'content'} or item['role'] != role or
                     not isinstance(item['content'], str) or not item['content'].strip() or len(item['content']) > limit
-                    for item, role, limit in zip(messages, ('system', 'user'), (2500, 180)))):
+                    for item, role, limit in zip(messages, ('system', 'user'),
+                                                (2500, 180) if channel == 'web_reference' else (6000, 6000)))):
             raise CloudError('Для поиска нужен один короткий запрос без вложений и истории.')
-        timeout = min(timeout, 55)
+        timeout = min(timeout, 55 if channel == 'web_reference' else 180)
     request = _request.get()
     if effort is None and request is not None:
         effort = request[0]
@@ -333,7 +356,9 @@ def generate(messages, *, channel, output_schema=None, cancel=None, timeout=180,
             command_options = {'effort': effort}
             if web_reference:
                 command_options['web_reference'] = True
-            process = subprocess.Popen(command(path, directory, schema_path, image_paths, **command_options),
+            arguments = (resume_command(path, directory, resume_thread) if resume_thread is not None else
+                         command(path, directory, schema_path, image_paths, **command_options))
+            process = subprocess.Popen(arguments,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, encoding='utf-8', errors='replace', env=child_environment(), **_flags())
             events = queue.Queue(maxsize=0)

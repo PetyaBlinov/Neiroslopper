@@ -390,7 +390,8 @@ class Assistant:
                     from .chat_context import bounded_history, chat_snapshot
                     answer = codex_assistant.consult_chat(
                         prompt, on_chunk or (lambda _: None), cancel,
-                        state=chat_snapshot(state), history=bounded_history(state.get("chat_history", ())))
+                        state=chat_snapshot(state), history=bounded_history(state.get("chat_history", ())),
+                        resume_thread=state.get('codex_chat'))
                     if answer.get("cancelled"):
                         result = Reply("Запрос отменён.")
                     else:

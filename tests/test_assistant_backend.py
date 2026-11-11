@@ -129,17 +129,23 @@ class AssistantBackendTests(unittest.TestCase):
         self.assertTrue(saved["not_motion_state"])
         self.assertEqual(memory.snapshot(("editor", 3)), {})
 
-    def test_help_describes_voice_review_and_does_not_claim_smart_image_ui(self):
+    def test_help_describes_explicit_image_review_and_conditional_native_display(self):
         voice = self.answer("Как включить голосовой ввод?")
         self.assertIn("«Голос»", voice.text)
         self.assertIn("«Вставить в запрос»", voice.text)
         self.assertIn("локальное распознавание", voice.text)
         self.assertIsNone(voice.plan)
         image = self.answer("Как проверить обводку Codex?")
-        self.assertIn("пока не интегрированы", image.text)
+        self.assertIn("три варианта", image.text)
+        self.assertIn("согласие на передачу изображений", image.text)
+        self.assertIn("применение к эскизу и рисование запускаются отдельно", image.text)
+        self.assertIsNone(image.plan)
         display = self.answer("Как работает DWIN?")
-        self.assertIn("ещё не перенесены", display.text)
+        self.assertIn("совместимой пары прошивок", display.text)
+        self.assertIn("ещё не подтверждены", display.text)
+        self.assertIn("не автономное рисование", display.text)
         self.assertNotIn("S24 Ultra", display.text)
+        self.generate.assert_not_called()
 
     def test_mks_pen_description_keeps_ten_second_whole_transfer(self):
         reply = self.answer("Как работает соленоид?")

@@ -30,6 +30,14 @@ class DiscoveredFluidNC:
     endpoint: str
     source: str
     identity: str
+    mac: str = ''
+
+
+def board_mac(lines):
+    matches = [match.group(1).upper().replace(':', '-') for line in lines
+               for match in [re.search(r':MAC=([0-9A-Fa-f]{2}(?:[:-][0-9A-Fa-f]{2}){5})\]', line)]
+               if match]
+    return matches[0] if len(matches) == 1 else ''
 
 
 class _Stop:
@@ -165,7 +173,7 @@ def _probe(endpoint, source, stop, deadline):
                                     for line in lines
                                     if line.startswith("[MSG:Machine:") and line.endswith("]")), "FluidNC")
                     machine = re.sub(r"[\x00-\x1f\x7f]", "", machine)[:64] or "FluidNC"
-                    return DiscoveredFluidNC(f"{machine} · {peer}", address, source, identity)
+                    return DiscoveredFluidNC(f"{machine} · {peer}", address, source, identity, board_mac(lines))
                 if line:
                     lines.append(line)
                     if len(lines) > 64:

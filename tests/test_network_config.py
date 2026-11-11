@@ -323,7 +323,7 @@ class RuntimeAndSessionTests(unittest.TestCase):
         self.assertEqual(wire.history, [b"$I\n", b"$Config/Dump\n", b"?"])
 
     def test_runtime_marker_is_optional_strict_and_never_authorizes_configuration(self):
-        valid = "[JD-DGUS:VERSION=2.1,UPTIME_MS=4294967295,RESET_REASON=255]"
+        valid = "[JD-DGUS:2,UI=1,UPTIME_MS=4294967295,RESET_REASON=255]"
         self.assertEqual(board_runtime_info([valid]),
                          {"firmware_uptime_ms": 4294967295, "firmware_reset_reason": 255})
         for lines in ([], [valid, valid], [valid[:-1]],

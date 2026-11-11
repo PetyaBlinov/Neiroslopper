@@ -55,6 +55,8 @@ def build_workspace(app):
     a.wifi_address_button = ttk.Button(a.wifi_connection_frame, text="По адресу…", command=a.open_wifi_address,
                                       style="Quiet.TButton")
     a.wifi_address_button.pack(side="left", padx=(8, 0))
+    ttk.Checkbutton(a.wifi_connection_frame, text='Автосвязь', variable=a.auto_wifi,
+                    command=a.toggle_auto_wifi).pack(side='left', padx=(8, 0))
     a.demo_connection_frame = ttk.Frame(a.target_area)
     ttk.Label(a.demo_connection_frame, text="Без оборудования", style="Muted.TLabel").pack(side="left")
     a.demo_connection_frame.pack(fill="x")
@@ -70,6 +72,8 @@ def build_workspace(app):
     a.diagnostics_button.pack(side="right", padx=(12, 0))
     a.status_label = ttk.Label(status_row, textvariable=a.status, style="Status.TLabel", width=1)
     a.status_label.pack(side="left", fill="x", expand=True)
+    a.panel_request_button = ttk.Button(status_row, text='Запрос с экрана…', command=a.handle_panel_request,
+                                      style='Accent.TButton')
     a.diagnostics_frame = ttk.Frame(footer, style="App.TFrame")
     scrollbar = ttk.Scrollbar(a.diagnostics_frame, orient="vertical")
     scrollbar.pack(side="right", fill="y")

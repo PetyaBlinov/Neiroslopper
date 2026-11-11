@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "source_repository": "https://github.com/levsasha2018-crypto/Neiroslopper",
+  "source_commit": "0174a3abd3945288dad330e52b8f468cf58c13b1",
+  "protocol": "JD-DGUS 2.1",
+  "declared_board": "MKS DLC32 V2.2",
+  "declared_display_pixels": [800, 480],
+  "hardware_tested": false,
+  "installed_by_this_change": false,
+  "automatic_download": false,
+  "artifacts": [
+    {
+      "path": "dwin-assistant/firmware/firmware-v4.1.1-JD-DGUS2.1.bin",
+      "bytes": 1844400,
+      "sha256": "6adeacc1b158465fc569666117d5c6ab376417fe37e86746a4f795d7d090e272",
+      "role": "application image, not a full flash image"
+    },
+    {
+      "path": "dwin-assistant/firmware/fluidnc-jd-dgus-source.zip",
+      "bytes": 3008663,
+      "sha256": "18e93607cfd5ab111057c58c8d17e7847077772302ea36706e5b0c9730bf5fe1",
+      "role": "matching firmware source; see COPYING-FluidNC.txt"
+    },
+    {
+      "path": "dwin-assistant/display/DWIN_ASSISTANT_800x480_20261108.zip",
+      "bytes": 473901,
+      "sha256": "e93ff8b091da939bcaff5b812379372b77db7b5dc675a9c41da22ff76404b7f6",
+      "role": "DWIN interface package; see LICENSE-DEJAVU.txt"
+    }
+  ]
+}

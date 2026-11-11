@@ -38,7 +38,9 @@ def display_ports(port_infos, *, main_selected="", main_active=""):
 
 
 class DwinWindow:
-    def __init__(self, app):
+    native = False
+
+    def __init__(self, app, *, show=True):
         self.app = app
         self.closed = False
         self.bridge = SerialBridge()
@@ -48,6 +50,8 @@ class DwinWindow:
         self.armed_since = float("inf")
         self.last_selectors = None
         self.window = tk.Toplevel(app.root)
+        if not show:
+            self.window.withdraw()
         self.window.title("DWIN · экран плоттера")
         self.window.geometry("700x580")
         self.window.minsize(640, 540)
@@ -213,5 +217,163 @@ class DwinWindow:
         self.closed = True
         self.armed.set(False)
         self.bridge.close()
+        self.window.destroy()
+        self.app.dwin_window = None
+
+
+class NativeDwinWindow:
+    """PC companion for a panel controlled by the board, not a second UART writer.
+
+    Construction only creates widgets. The explicit start/reconnect action
+    opens the single versioned event channel; it never claims motion.
+    """
+    native = True
+
+    def __init__(self, app, *, show=True):
+        self.app, self.closed = app, False
+        self.bridge = self.panel_assistant = None
+        self.window = tk.Toplevel(app.root)
+        if not show:
+            self.window.withdraw()
+        self.window.title('DWIN · панель MKS')
+        self.window.protocol('WM_DELETE_WINDOW', self.window.withdraw)
+        from branding import apply_app_icon
+        from display_scaling import ui_scale, scale_widget_tree
+        apply_app_icon(self.window)
+        scale = ui_scale(self.window)
+        self.window.geometry(f'{round(540 * scale)}x{round(250 * scale)}')
+        self.window._neiroslopper_geometry_scaled = True
+        body = ttk.Frame(self.window, padding=16)
+        body.pack(fill='both', expand=True)
+        self.info = tk.StringVar(value='Канал DWIN не подключён')
+        ttk.Label(body, textvariable=self.info, wraplength=490).pack(anchor='w', pady=(0, 14))
+        self.helper_enabled = tk.BooleanVar(value=False)
+        self.mic_enabled = tk.BooleanVar(value=False)
+        self.armed = tk.BooleanVar(value=False)  # Legacy window interface; never used for native control.
+        ttk.Checkbutton(body, text='Разрешить вопросы помощнику с экрана', variable=self.helper_enabled,
+                        command=self.permissions_changed).pack(anchor='w')
+        ttk.Checkbutton(body, text='Разрешить запись микрофона ПК с экрана', variable=self.mic_enabled,
+                        command=self.permissions_changed).pack(anchor='w', pady=(5, 12))
+        row = ttk.Frame(body)
+        row.pack(fill='x')
+        ttk.Button(row, text='Подключить канал DWIN', command=self.reconnect).pack(side='left')
+        ttk.Button(row, text='Скрыть', command=self.window.withdraw, style='Quiet.TButton').pack(side='right')
+        scale_widget_tree(self.window)
+
+    def start(self):
+        from dwin_native import NativeDwinClient
+        session = self.app.controller.session
+        peer = getattr(getattr(session, 'wire', None), 'peer_address', None)
+        if not peer or not self.app.network_controller() or not getattr(session, 'native_panel', False):
+            self.info.set('Native DWIN: сначала подключите MKS по Wi-Fi.')
+            return False
+        host = f'[{peer}]' if ':' in peer else peer
+        self.bridge = NativeDwinClient(f'tcp://{host}:8888', expected_peer=peer,
+                                       interactive=getattr(session, 'panel_assistant', False))
+        from dwin_assistant import PanelAssistant
+        self.panel_assistant = PanelAssistant(self.bridge.panel_answer, review_voice=self.review_voice)
+        self.info.set('Проверяю версию канала DWIN…')
+        self.bridge.start()
+        return True
+
+    def reconnect(self):
+        if self.app.controller.busy or self.app.controller.cancelled.is_set():
+            self.info.set('Дождитесь остановки и подключитесь к MKS заново.')
+            return
+        self.close_assistant()
+        if self.bridge is not None:
+            self.bridge.close()
+        self.start()
+
+    def review_voice(self, text):
+        if self.closed or not self.mic_enabled.get():
+            return False
+        self.app.open_assistant()
+        window = self.app.assistant_window
+        insert = getattr(window, 'insert_voice_text', None)
+        return bool(callable(insert) and insert(text))
+
+    def permissions_changed(self):
+        assistant = self.panel_assistant
+        if assistant is not None and ((assistant.voice_pending and not self.mic_enabled.get()) or
+                                      (not assistant.voice_pending and not self.helper_enabled.get())):
+            assistant.cancel()
+
+    def close_assistant(self):
+        if self.panel_assistant is not None:
+            self.panel_assistant.close()
+            self.panel_assistant = None
+
+    def service_assistant(self, bridge):
+        from dwin_assistant import ERROR, sheet_segments
+        from dwin_native import ASK, MIC_START, MIC_STOP, CANCEL, VIEW_SHEET
+        assistant = self.panel_assistant
+        if bridge.panel_interrupted():
+            assistant.cancel()
+        for request_id, action, text in bridge.panel_requests():
+            if action == CANCEL:
+                assistant.cancel(request_id)
+            elif action == MIC_STOP:
+                if not assistant.stop_voice(request_id):
+                    bridge.panel_answer(request_id, ERROR, 'Запись не началась. Повторите запрос.')
+            elif action == VIEW_SHEET:
+                try:
+                    position = self.app.position
+                    start = self.app.axes().paper(position) if position is not None and self.app.zero else None
+                    box, lines = sheet_segments(self.app.editor_snapshot(), start_position=start)
+                    bridge.panel_sheet(request_id, box, lines)
+                except (ValueError, TypeError):
+                    bridge.panel_sheet(request_id)
+            elif action == ASK:
+                if not self.helper_enabled.get():
+                    bridge.panel_answer(request_id, ERROR, 'Разрешите вопросы с экрана в окне DWIN на ПК.')
+                elif not assistant.start(request_id, text, self.app.editor_snapshot()):
+                    bridge.panel_answer(request_id, ERROR, 'Помощник занят. Повторите запрос.')
+            elif action == MIC_START:
+                if not self.mic_enabled.get():
+                    bridge.panel_answer(request_id, ERROR, 'Разрешите микрофон ПК в окне DWIN.')
+                elif not assistant.start_voice(request_id, self.app.editor_snapshot()):
+                    bridge.panel_answer(request_id, ERROR, 'Микрофон занят. Повторите запрос.')
+        if not self.mic_enabled.get() and assistant.voice_pending:
+            assistant.cancel()
+        assistant.pump()
+
+    def pump(self):
+        if self.closed or self.bridge is None:
+            return
+        from eventlog import record_event
+        bridge = self.bridge
+        while True:
+            try:
+                kind, text = bridge.notices.get_nowait()
+            except queue.Empty:
+                break
+            self.info.set(text)
+            self.app.note('DWIN · ' + text)
+            record_event(self.app, 'dwin.native.link', kind=kind, **bridge.diagnostic_state())
+        for event in bridge.pending():
+            record_event(self.app, 'dwin.native.event', vp=event.vp, key=event.key,
+                         result_code=event.result_code, board_event_seq=event.seq,
+                         firmware_uptime_ms=event.uptime_ms)
+        board = bridge.snapshot()
+        self.app.apply_panel_state(board)
+        if board:
+            bridge.answer_probe()
+            text = ('MKS управляет панелью · ПК получает состояние и запросы' if board.confirmed else
+                    'MKS не подтвердила профиль локального управления')
+            if self.info.get() != text:
+                self.info.set(text)
+            bridge.publish_status(bool(self.app.paths), min(100, max(0, round(float(self.app.progress['value'])))))
+            self.service_assistant(bridge)
+        elif self.panel_assistant is not None:
+            self.panel_assistant.cancel()
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        self.close_assistant()
+        if self.bridge is not None:
+            self.bridge.close()
         self.window.destroy()
         self.app.dwin_window = None
