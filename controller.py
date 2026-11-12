@@ -1389,7 +1389,8 @@ class Controller:
                     break
                 # Lower and settle exactly at the stroke/dot position. No
                 # duty-cycle batching is needed while drawing unpowered.
-                s.set_pen(True, self.pen)
+                if s.pen_down is not True or s.coil_on is not False:
+                    s.set_pen(True, self.pen)
                 span = 0.
                 for point in path[1:]:
                     length = math.dist(current, point)
@@ -1414,6 +1415,9 @@ class Controller:
             raise
 
     def draw_with_lift(self, paths, current, axes, feed, action):
+        from geometry import join_touching_paths
+        if action == 'draw':
+            paths = join_touching_paths(paths)
         if self.pen.power_raises:
             return self.draw_power_raises(paths, current, axes, feed, action)
         s = self.session

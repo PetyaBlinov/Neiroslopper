@@ -76,6 +76,19 @@ def route(paths, start):
             current = point
 
 
+def join_touching_paths(paths):
+    """Join consecutive strokes only at a shared endpoint; preserve order/dots."""
+    result = []
+    for path in paths:
+        stroke = list(path)
+        if (result and len(result[-1]) > 1 and len(stroke) > 1 and
+                math.dist(result[-1][-1], stroke[0]) <= .0005):
+            result[-1].extend(stroke[1:])
+        else:
+            result.append(stroke)
+    return result
+
+
 def test_square(sheet):
     size = min(10.0, sheet.width - 2, sheet.height - 2)
     if size < 1:
